@@ -14,15 +14,24 @@
   (:require [jolt.ffi :as ffi]))
 
 ;; --- constants ---------------------------------------------------------------
-;; GtkOrientation
-(def ORIENTATION-HORIZONTAL 0)
-(def ORIENTATION-VERTICAL   1)
-
 ;; GApplicationFlags — 0 is G_APPLICATION_DEFAULT_FLAGS
 (def APPLICATION-DEFAULT-FLAGS 0)
 
 ;; GConnectFlags — 0 is no flags (behaves like g_signal_connect)
 (def CONNECT-DEFAULT 0)
+
+;; --- GObject enum introspection (table-free constant resolution) -------------
+;; Used by glimmer.genum to resolve a GEnum member nick (:start, :fill) to its
+;; integer value at runtime, with no enum-constant table in the library.
+;; g_type_from_name returns the GType (a gsize) for a registered type, or 0 if
+;; the type isn't registered yet (GType registration is lazy). g_type_class_ref
+;; returns the class struct — for an enum type, a GEnumClass*.
+;; g_enum_get_value_by_nick looks a member up by its lowercase nick, returning a
+;; GEnumValue* = { gint value; const gchar *value_name; const gchar *value_nick; }
+;; whose first field is the integer we want.
+(ffi/defcfn g-type-from-name        "g_type_from_name"        [:string] :size_t)
+(ffi/defcfn g-type-class-ref        "g_type_class_ref"        [:size_t] :pointer)
+(ffi/defcfn g-enum-get-value-by-nick "g_enum_get_value_by_nick" [:pointer :string] :pointer)
 
 ;; --- application / main loop (libgio, libglib, libgtk-4) ---------------------
 ;; gtk_application_new returns a GtkApplication (a GApplication subclass) — needed
@@ -63,11 +72,14 @@
 (ffi/defcfn gtk-label-new               "gtk_label_new"               [:string] :pointer)
 (ffi/defcfn gtk-label-set-text          "gtk_label_set_text"          [:pointer :string] :void)
 (ffi/defcfn gtk-label-set-label         "gtk_label_set_label"         [:pointer :string] :void)
+(ffi/defcfn gtk-label-set-xalign        "gtk_label_set_xalign"        [:pointer :float] :void)
+(ffi/defcfn gtk-label-set-markup        "gtk_label_set_markup"        [:pointer :string] :void)
 
 (ffi/defcfn gtk-entry-new               "gtk_entry_new"               [] :pointer)
 ;; GtkEditable interface (implemented by GtkEntry):
 (ffi/defcfn gtk-editable-get-text       "gtk_editable_get_text"       [:pointer] :string)
 (ffi/defcfn gtk-editable-set-text       "gtk_editable_set_text"       [:pointer :string] :void)
+(ffi/defcfn gtk-editable-set-placeholder-text "gtk_entry_set_placeholder_text" [:pointer :string] :void)
 
 (ffi/defcfn gtk-checkbutton-new               "gtk_check_button_new"               [] :pointer)
 (ffi/defcfn gtk-checkbutton-new-with-label    "gtk_check_button_new_with_label"    [:string] :pointer)
@@ -76,10 +88,27 @@
 
 (ffi/defcfn gtk-separator-new           "gtk_separator_new"           [:int] :pointer)
 
-;; --- generic widget state ----------------------------------------------------
+;; --- generic widget state & layout -------------------------------------------
+;; The margin/halign/hexpand setters are GtkWidget props — they apply to every
+;; widget, not just a specific kind, so glimmer.widget applies them to all tags.
+;; halign/valign take a GtkAlign enum value, resolved at runtime by glimmer.genum
+;; from an idiomatic keyword nick (:start, :fill, :center).
 (ffi/defcfn gtk-widget-set-visible    "gtk_widget_set_visible"    [:pointer :int] :void)
 (ffi/defcfn gtk-widget-set-sensitive  "gtk_widget_set_sensitive"  [:pointer :int] :void)
 (ffi/defcfn gtk-widget-set-tooltip-text "gtk_widget_set_tooltip_text" [:pointer :string] :void)
+(ffi/defcfn gtk-widget-set-margin-start   "gtk_widget_set_margin_start"   [:pointer :int] :void)
+(ffi/defcfn gtk-widget-set-margin-end     "gtk_widget_set_margin_end"     [:pointer :int] :void)
+(ffi/defcfn gtk-widget-set-margin-top     "gtk_widget_set_margin_top"     [:pointer :int] :void)
+(ffi/defcfn gtk-widget-set-margin-bottom  "gtk_widget_set_margin_bottom"  [:pointer :int] :void)
+(ffi/defcfn gtk-widget-set-halign "gtk_widget_set_halign" [:pointer :int] :void)
+(ffi/defcfn gtk-widget-set-valign "gtk_widget_set_valign" [:pointer :int] :void)
+(ffi/defcfn gtk-widget-set-hexpand "gtk_widget_set_hexpand" [:pointer :int] :void)
+(ffi/defcfn gtk-widget-set-vexpand "gtk_widget_set_vexpand" [:pointer :int] :void)
+
+;; --- frame (single-child container with an optional label) -------------------
+(ffi/defcfn gtk-frame-new       "gtk_frame_new"       [:string] :pointer)
+(ffi/defcfn gtk-frame-set-label "gtk_frame_set_label" [:pointer :string] :void)
+(ffi/defcfn gtk-frame-set-child "gtk_frame_set_child" [:pointer :pointer] :void)
 
 ;; --- signals & reference counting (libgobject) -------------------------------
 ;; g_signal_connect_data(instance, detailed_signal, c_handler, data, destroy_data, flags)

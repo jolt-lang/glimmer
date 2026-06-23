@@ -10,16 +10,22 @@
   over reactive cells (not values), so the first render's closure stays correct
   for the widget's life, exactly like reagent."
   (:require [glimmer.ffi :as g]
+            [glimmer.genum :as genum]
             [jolt.ffi :as ffi]))
 
 ;; --- value marshalling -------------------------------------------------------
 (defn- ->bool [x] (if x 1 0))
 
-(defn- ->orientation [x]
-  (cond (#{:horizontal "horizontal"} x) g/ORIENTATION-HORIZONTAL
-        (#{:vertical "vertical"} x)     g/ORIENTATION-VERTICAL
-        (#{g/ORIENTATION-HORIZONTAL 0} x) g/ORIENTATION-HORIZONTAL
-        :else g/ORIENTATION-VERTICAL))
+;; Resolve a property that may be a GEnum nick keyword (:start, :fill) OR a raw
+;; integer. genum/enum returns nil when the type isn't live yet or the nick is
+;; unknown; in that case fall back to the raw value (so callers can still pass
+;; an explicit int). Applied in :apply, where the widget already exists and its
+;; enum type is registered — so the common path resolves the nick.
+(defn- ->enum [type-name x]
+  (or (genum/enum type-name x) x))
+
+;; GtkOrientation nicks are :horizontal / :vertical. Used by box & separator.
+(defn- ->orientation [x] (->enum "GtkOrientation" x))
 
 ;; --- tag aliases (sugar) -----------------------------------------------------
 (def ^:private aliases {:hbox :box :vbox :box})
@@ -49,8 +55,10 @@
 
 (defn- box-spec []
   {:ctor    (fn [p]
-              (g/gtk-box-new (->orientation (:orientation p :vertical))
-                             (or (:spacing p) 0)))
+              ;; construct vertical by default; the real orientation is set in
+              ;; :apply, by which point the box exists and GtkOrientation is
+              ;; registered (the box installs the orientation property).
+              (g/gtk-box-new 1 (or (:spacing p) 0)))
    :apply   (fn [w p]
               (when (contains? p :spacing)     (g/gtk-box-set-spacing w (:spacing p)))
               (when (contains? p :homogeneous) (g/gtk-box-set-homogeneous w (->bool (:homogeneous p))))
@@ -68,15 +76,18 @@
 (defn- label-spec []
   {:ctor  (fn [p] (g/gtk-label-new (or (:label p) (:text p) "")))
    :apply (fn [w p]
-            (when (contains? p :label) (g/gtk-label-set-label w (:label p)))
-            (when (contains? p :text)  (g/gtk-label-set-text w (:text p))))
+            (when (contains? p :label)  (g/gtk-label-set-label w (:label p)))
+            (when (contains? p :text)   (g/gtk-label-set-text w (:text p)))
+            (when (contains? p :markup) (g/gtk-label-set-markup w (:markup p)))
+            (when (contains? p :xalign) (g/gtk-label-set-xalign w (:xalign p))))
    :container :none})
 
 (defn- entry-spec []
   {:ctor  (fn [_] (g/gtk-entry-new))
    :apply (fn [w p]
-            (when (contains? p :text) (set-entry-text! w (:text p)))
-            (when (contains? p :sensitive) (g/gtk-widget-set-sensitive w (->bool (:sensitive p)))))
+            (when (contains? p :text)        (set-entry-text! w (:text p)))
+            (when (contains? p :placeholder) (g/gtk-editable-set-placeholder-text w (:placeholder p)))
+            (when (contains? p :sensitive)   (g/gtk-widget-set-sensitive w (->bool (:sensitive p)))))
    :container :none})
 
 (defn- checkbutton-spec []
@@ -88,9 +99,14 @@
    :container :none})
 
 (defn- separator-spec []
-  {:ctor  (fn [p] (g/gtk-separator-new (->orientation (:orientation p :horizontal))))
-   :apply (fn [_ _])
+  {:ctor  (fn [_] (g/gtk-separator-new 0))   ; horizontal default; :apply sets the real orientation
+   :apply (fn [w p] (when (contains? p :orientation) (g/gtk-orientable-set-orientation w (->orientation (:orientation p)))))
    :container :none})
+
+(defn- frame-spec []
+  {:ctor     (fn [p] (g/gtk-frame-new (or (:label p) "")))
+   :apply    (fn [w p] (when (contains? p :label) (g/gtk-frame-set-label w (or (:label p) ""))))
+   :container :frame})
 
 (def ^:private specs
   {:window      (window-spec)
@@ -99,7 +115,8 @@
    :label       (label-spec)
    :entry       (entry-spec)
    :checkbutton (checkbutton-spec)
-   :separator   (separator-spec)})
+   :separator   (separator-spec)
+   :frame       (frame-spec)})
 
 (defn- spec-for [tag] (specs (normalize-tag tag)))
 
@@ -156,6 +173,27 @@
         (swap! callables conj cb)
         (g/g-signal-connect-data widget signal cb ffi/null ffi/null g/CONNECT-DEFAULT)))))
 
+;; --- universal GtkWidget props (apply to every widget, every tag) ------------
+;; Margins, alignment, expand — GtkWidget-level props that aren't specific to any
+;; tag, so they're applied to all of them in addition to the tag's own :apply.
+;; :halign/:valign take a GtkAlign nick (:start :end :center :fill :baseline...)
+;; resolved at runtime by glimmer.genum — no constant table.
+(defn apply-widget-props!
+  [widget props]
+  (when-let [m (:margin props)]
+    (g/gtk-widget-set-margin-start widget m)
+    (g/gtk-widget-set-margin-end widget m)
+    (g/gtk-widget-set-margin-top widget m)
+    (g/gtk-widget-set-margin-bottom widget m))
+  (when-let [m (:margin-start props)]   (g/gtk-widget-set-margin-start widget m))
+  (when-let [m (:margin-end props)]     (g/gtk-widget-set-margin-end widget m))
+  (when-let [m (:margin-top props)]     (g/gtk-widget-set-margin-top widget m))
+  (when-let [m (:margin-bottom props)]  (g/gtk-widget-set-margin-bottom widget m))
+  (when-let [a (:halign props)] (g/gtk-widget-set-halign widget (->enum "GtkAlign" a)))
+  (when-let [a (:valign props)] (g/gtk-widget-set-valign widget (->enum "GtkAlign" a)))
+  (when (contains? props :hexpand) (g/gtk-widget-set-hexpand widget (->bool (:hexpand props))))
+  (when (contains? props :vexpand) (g/gtk-widget-set-vexpand widget (->bool (:vexpand props)))))
+
 ;; --- public create / patch ---------------------------------------------------
 (defn create!
   "Construct a fresh GTK widget for `tag`, apply `props`, and connect any :on-*
@@ -165,6 +203,7 @@
   (let [s (spec-for tag)
         widget ((:ctor s) props)]
     ((:apply s) widget props)
+    (apply-widget-props! widget props)
     (connect-signals! widget props)
     widget))
 
@@ -173,7 +212,8 @@
   (signals stay wired from mount) and keys whose value is nil."
   [tag widget props]
   (let [applied (into {} (filter (fn [[k v]] (and (not (signals k)) (some? v))) props))]
-    ((:apply (spec-for tag)) widget applied)))
+    ((:apply (spec-for tag)) widget applied)
+    (apply-widget-props! widget applied)))
 
 (defn show!
   "Make a widget visible. GTK4 widgets default to visible, but setting it
@@ -186,8 +226,9 @@
   "Add `child` to the end of `parent`. Dispatches on the parent's container kind."
   [parent-tag parent child]
   (case (container-kind parent-tag)
-    :box   (g/gtk-box-append parent child)
+    :box    (g/gtk-box-append parent child)
     :window (g/gtk-window-set-child parent child)
+    :frame  (g/gtk-frame-set-child parent child)
     nil))
 
 (defn remove-child!
@@ -196,13 +237,15 @@
   (case (container-kind parent-tag)
     :box    (g/gtk-box-remove parent child)
     :window (g/gtk-window-set-child parent ffi/null)
+    :frame  (g/gtk-frame-set-child parent ffi/null)
     nil))
 
 (defn replace-child!
   "Replace `old-child` with `new-child` at the same position in `parent`."
   [parent-tag parent old-child new-child]
   (case (container-kind parent-tag)
-    :box   (do (g/gtk-box-remove parent old-child)
-               (g/gtk-box-append parent new-child))
+    :box    (do (g/gtk-box-remove parent old-child)
+                (g/gtk-box-append parent new-child))
     :window (g/gtk-window-set-child parent new-child)
+    :frame  (g/gtk-frame-set-child parent new-child)
     nil))

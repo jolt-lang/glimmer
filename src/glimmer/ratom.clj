@@ -81,7 +81,7 @@
   ;; Run the reaction body under *current-watcher* so every reactive it derefs
   ;; registers this recompute as a watcher; recompute fires (and re-tracks) when
   ;; any dependency later changes.
-  (binding [*current-watcher* (fn [_] (recompute! r))]
+  (binding [*current-watcher* (host-deref (:trigger r))]
     (let [old (host-deref (:state r))
           new ((:f r))]
       (host-reset! (:state r) new)
@@ -93,7 +93,12 @@
   whenever a reactive cell it derefs changes. Other components can subscribe to
   a reaction just like any reactive (read it with @ during render)."
   [f]
-  (let [r {:glimmer/kind :reaction :f f :state (clojure.core/atom nil) :watches (clojure.core/atom #{})}]
+  (let [r {:glimmer/kind :reaction :f f :state (clojure.core/atom nil)
+           :watches (clojure.core/atom #{}) :trigger (clojure.core/atom nil)}]
+    ;; One stable watcher fn per reaction, reused on every recompute so a reaction
+    ;; registers exactly one watch per dependency. A fresh closure per recompute
+    ;; would grow the dep watch set every change -> runaway render storm.
+    (host-reset! (:trigger r) (fn [_] (recompute! r)))
     (recompute! r)
     r))
 

@@ -95,3 +95,14 @@
     (is (= 1 @done-count))
     (swap! state update-in [:todos 0 :done] not)   ; mark first todo done
     (is (= 2 @done-count) "writing the source recomputes the derived reaction")))
+
+(deftest reaction-keeps-one-watch-per-dependency
+  ;; recompute! must register the SAME watcher fn on every recompute, so a reaction
+  ;; holds exactly one watch on each dependency. A fresh closure per recompute grows
+  ;; the dep's watch set every update (1,2,4,8...) which, in a component, becomes a
+  ;; runaway render storm after a handful of keystrokes.
+  (let [a (atom 0)
+        _  (reaction (inc @a))]
+    (dotimes [_ 6] (swap! a inc))
+    (is (= 1 (count (clojure.core/deref (:watches a))))
+        "a reaction must keep exactly one watch on a dependency across recomputes")))

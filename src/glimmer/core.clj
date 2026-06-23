@@ -96,8 +96,13 @@
         cached-render-fn (:render-fn @inst-atom)]
     (swap! inst-atom (fn [cur] (if (:children cur) cur (assoc cur :children [(atom nil)]))))
     (let [child-atom (first (:children @inst-atom))
-          ;; subscribe: any reactive read during render re-runs just this component
-          hiccup (binding [r/*current-watcher* (fn [_] (reconcile-comp! parent-widget parent-tag v inst-atom))]
+          ;; subscribe: any reactive read during render re-runs just this component.
+          ;; The watcher is cached on the instance so it's the SAME fn every render;
+          ;; a fresh closure would grow each cell's watch set on every re-render.
+          watcher (or (:watcher @inst-atom)
+                      (let [w (fn [_] (reconcile-comp! parent-widget parent-tag v inst-atom))]
+                        (swap! inst-atom assoc :watcher w) w))
+          hiccup (binding [r/*current-watcher* watcher]
                    (if cached-render-fn
                      (cached-render-fn)                       ; Form-2: cached render fn
                      (let [result (apply f args)]             ; first invocation
