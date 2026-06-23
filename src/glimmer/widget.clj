@@ -9,12 +9,23 @@
   re-render. Signals are connected once at mount — handlers are expected to close
   over reactive cells (not values), so the first render's closure stays correct
   for the widget's life, exactly like reagent."
-  (:require [glimmer.ffi :as g]
+  (:require [clojure.string :as str]
+            [glimmer.ffi :as g]
             [glimmer.genum :as genum]
             [jolt.ffi :as ffi]))
 
 ;; --- value marshalling -------------------------------------------------------
 (defn- ->bool [x] (if x 1 0))
+
+(defn escape-markup
+  "Escape `&`, `<`, `>` so `s` can be embedded safely inside Pango markup passed
+  to a label's `:markup` prop. `&` is escaped first so the angle-bracket escapes
+  are not themselves re-encoded."
+  ^String [^String s]
+  (-> s
+      (str/replace "&" "&amp;")
+      (str/replace "<" "&lt;")
+      (str/replace ">" "&gt;")))
 
 ;; Resolve a property that may be a GEnum nick keyword (:start, :fill) OR a raw
 ;; integer. genum/enum returns nil when the type isn't live yet or the nick is
@@ -79,7 +90,12 @@
             (when (contains? p :label)  (g/gtk-label-set-label w (:label p)))
             (when (contains? p :text)   (g/gtk-label-set-text w (:text p)))
             (when (contains? p :markup) (g/gtk-label-set-markup w (:markup p)))
-            (when (contains? p :xalign) (g/gtk-label-set-xalign w (:xalign p))))
+            (when (contains? p :xalign) (g/gtk-label-set-xalign w (:xalign p)))
+            (when (contains? p :wrap)   (g/gtk-label-set-wrap w (->bool (:wrap p))))
+            (when (contains? p :width-chars)     (g/gtk-label-set-width-chars w (:width-chars p)))
+            (when (contains? p :max-width-chars) (g/gtk-label-set-max-width-chars w (:max-width-chars p)))
+            (when (contains? p :lines)   (g/gtk-label-set-lines w (:lines p)))
+            (when (contains? p :ellipsize) (g/gtk-label-set-ellipsize w (->enum "PangoEllipsizeMode" (:ellipsize p)))))
    :container :none})
 
 (defn- entry-spec []
@@ -108,6 +124,17 @@
    :apply    (fn [w p] (when (contains? p :label) (g/gtk-frame-set-label w (or (:label p) ""))))
    :container :frame})
 
+(defn- scrolled-spec []
+  ;; A single-child viewport. Built with natural-size propagation OFF so the
+  ;; child scrolls inside the allotted area instead of forcing the window bigger.
+  {:ctor     (fn [_]
+               (let [sw (g/gtk-scrolled-window-new ffi/null ffi/null)]
+                 (g/gtk-scrolled-window-set-propagate-natural-height sw 0)
+                 (g/gtk-scrolled-window-set-propagate-natural-width sw 0)
+                 sw))
+   :apply    (fn [_ _])
+   :container :scrolled})
+
 (def ^:private specs
   {:window      (window-spec)
    :box         (box-spec)
@@ -116,7 +143,8 @@
    :entry       (entry-spec)
    :checkbutton (checkbutton-spec)
    :separator   (separator-spec)
-   :frame       (frame-spec)})
+   :frame       (frame-spec)
+   :scrolled    (scrolled-spec)})
 
 (defn- spec-for [tag] (specs (normalize-tag tag)))
 
@@ -229,6 +257,7 @@
     :box    (g/gtk-box-append parent child)
     :window (g/gtk-window-set-child parent child)
     :frame  (g/gtk-frame-set-child parent child)
+    :scrolled (g/gtk-scrolled-window-set-child parent child)
     nil))
 
 (defn remove-child!
@@ -238,6 +267,7 @@
     :box    (g/gtk-box-remove parent child)
     :window (g/gtk-window-set-child parent ffi/null)
     :frame  (g/gtk-frame-set-child parent ffi/null)
+    :scrolled (g/gtk-scrolled-window-set-child parent ffi/null)
     nil))
 
 (defn replace-child!
@@ -248,4 +278,5 @@
                 (g/gtk-box-append parent new-child))
     :window (g/gtk-window-set-child parent new-child)
     :frame  (g/gtk-frame-set-child parent new-child)
+    :scrolled (g/gtk-scrolled-window-set-child parent new-child)
     nil))

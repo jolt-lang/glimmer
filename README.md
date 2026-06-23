@@ -85,7 +85,8 @@ may be native elements, component invocations (`[my-component arg]`), strings, o
 numbers (rendered as labels). `nil` children are skipped.
 
 **Containers:** `:window` (single child), `:box` (`:orientation :horizontal|:vertical`),
-`:hbox`, `:vbox`, `:frame` (single child, with an optional `:label`).
+`:hbox`, `:vbox`, `:frame` (single child, with an optional `:label`),
+`:scrolled` (single child; the child scrolls instead of forcing the window bigger).
 
 **Leaf widgets:** `:button`, `:label`, `:entry`, `:checkbutton`, `:separator`.
 
@@ -101,10 +102,14 @@ idiomatic keywords at runtime (see [Enum constants](#enum-constants) below):
 - Window: `:title`, `:width`, `:height`, `:visible`
 - Box: `:orientation`, `:spacing`, `:homogeneous`
 - Button: `:label`, `:tooltip`, `:sensitive`
-- Label: `:label`/`:text`, `:markup` (Pango markup), `:xalign` (0.0–1.0)
+- Label: `:label`/`:text`, `:markup` (Pango markup), `:xalign` (0.0–1.0),
+  `:wrap` (boolean), `:max-width-chars`/`:width-chars` (int — cap natural width so a
+  long line can't drive its container wider), `:lines` (int, with `:wrap`),
+  `:ellipsize` (`:none`/`:start`/`:middle`/`:end`)
 - Entry: `:text`, `:placeholder`, `:sensitive`
 - Checkbutton: `:label`, `:active`
 - Frame: `:label`
+- Scrolled: (none — built to scroll its child within the allotted area)
 
 **Events:**
 

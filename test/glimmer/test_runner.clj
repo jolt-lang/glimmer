@@ -27,7 +27,7 @@
     :else nil))
 
 (defn -main [& _]
-  (let [namespaces '[glimmer.ratom-test]]
+  (let [namespaces '[glimmer.ratom-test glimmer.widget-test]]
     (doseq [ns namespaces]
       (try (require ns :reload)
            (catch Exception e

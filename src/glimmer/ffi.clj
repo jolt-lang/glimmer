@@ -74,6 +74,14 @@
 (ffi/defcfn gtk-label-set-label         "gtk_label_set_label"         [:pointer :string] :void)
 (ffi/defcfn gtk-label-set-xalign        "gtk_label_set_xalign"        [:pointer :float] :void)
 (ffi/defcfn gtk-label-set-markup        "gtk_label_set_markup"        [:pointer :string] :void)
+;; Wrapping/ellipsizing bound a label's natural width so a long line can't drive
+;; its container (and a resizable window) ever wider. :wrap + :max-width-chars is
+;; the standard fix; :ellipsize is the alternative that truncates with an ellipsis.
+(ffi/defcfn gtk-label-set-wrap          "gtk_label_set_wrap"           [:pointer :int] :void)
+(ffi/defcfn gtk-label-set-width-chars   "gtk_label_set_width_chars"    [:pointer :int] :void)
+(ffi/defcfn gtk-label-set-max-width-chars "gtk_label_set_max_width_chars" [:pointer :int] :void)
+(ffi/defcfn gtk-label-set-lines         "gtk_label_set_lines"          [:pointer :int] :void)
+(ffi/defcfn gtk-label-set-ellipsize     "gtk_label_set_ellipsize"      [:pointer :int] :void)
 
 (ffi/defcfn gtk-entry-new               "gtk_entry_new"               [] :pointer)
 ;; GtkEditable interface (implemented by GtkEntry):
@@ -109,6 +117,17 @@
 (ffi/defcfn gtk-frame-new       "gtk_frame_new"       [:string] :pointer)
 (ffi/defcfn gtk-frame-set-label "gtk_frame_set_label" [:pointer :string] :void)
 (ffi/defcfn gtk-frame-set-child "gtk_frame_set_child" [:pointer :pointer] :void)
+
+;; --- scrolled window (single-child viewport that scrolls instead of growing) --
+;; GTK4 propagates the child's natural size by default, which would make a
+;; scrolled window grow to fit its child rather than scroll. The toolkit turns
+;; propagation off at construction so the child scrolls within the allotted area.
+(ffi/defcfn gtk-scrolled-window-new "gtk_scrolled_window_new" [:pointer :pointer] :pointer)
+(ffi/defcfn gtk-scrolled-window-set-child "gtk_scrolled_window_set_child" [:pointer :pointer] :void)
+(ffi/defcfn gtk-scrolled-window-set-propagate-natural-height
+  "gtk_scrolled_window_set_propagate_natural_height" [:pointer :int] :void)
+(ffi/defcfn gtk-scrolled-window-set-propagate-natural-width
+  "gtk_scrolled_window_set_propagate_natural_width" [:pointer :int] :void)
 
 ;; --- signals & reference counting (libgobject) -------------------------------
 ;; g_signal_connect_data(instance, detailed_signal, c_handler, data, destroy_data, flags)
