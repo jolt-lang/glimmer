@@ -12,6 +12,7 @@
   (:require [clojure.string :as str]
             [glimmer.ffi :as g]
             [glimmer.genum :as genum]
+            [hiccup2.core :as hiccup]
             [jolt.ffi :as ffi]))
 
 ;; --- value marshalling -------------------------------------------------------
@@ -26,6 +27,75 @@
       (str/replace "&" "&amp;")
       (str/replace "<" "&lt;")
       (str/replace ">" "&gt;")))
+
+;; --- Pango markup from hiccup data ------------------------------------------
+;; Pango's text-attribute markup is a small XML subset (b, i, span, a, ...),
+;; NOT HTML. Hiccup serializes vectors to a string and escapes content/attrs,
+;; but it is HTML-flavoured — it will happily emit <div>, <br>, or a typo'd span
+;; attribute, which gtk_label_set_markup then can't parse (the label falls back
+;; to raw text or emits a GTK warning). So we validate the hiccup *data* against
+;; Pango's vocabulary before handing it to hiccup for serialization: a bad
+;; fragment fails loudly at the call site instead of rendering silently wrong.
+;;
+;; Attribute names mirror Pango's own (underscores: :font_family, :letter_spacing),
+;; so what you write is exactly what Pango parses.
+(def ^:private pango-tags
+  "Pango markup vocabulary: tag -> the set of attributes it accepts, or nil when
+  the tag takes no attributes."
+  {:span #{:font_desc :font_family :face :size :style :weight :variant :stretch
+           :foreground :background :alpha :underline :underline_color :rise
+           :strikethrough :strikethrough_color :fallback :lang :letter_spacing
+           :show :line_height :allow_breaks :insert_hyphens :text_transform
+           :gravity :gravity_hint :overline :overline_color}
+   :a    #{:href}
+   :b nil :big nil :i nil :mark nil :s nil :small nil :sub nil :sup nil :tt nil
+   :u nil})
+
+(defn- markup-element? [form] (and (vector? form) (keyword? (first form))))
+
+(declare markup-validate!)
+
+(defn- markup-validate-element! [form]
+  (let [tag     (first form)
+        body    (rest form)
+        attrs?  (map? (first body))
+        attrs   (if attrs? (first body) nil)
+        children (if attrs? (rest body) body)]
+    (if-not (contains? pango-tags tag)
+      (throw (ex-info (str "glimmer/markup: :" (name tag) " is not a Pango tag")
+                      {:tag tag})))
+    (let [allowed (get pango-tags tag)]
+      (when (and attrs (seq attrs))
+        (if (nil? allowed)
+          (throw (ex-info (str "glimmer/markup: :" (name tag) " takes no attributes")
+                          {:tag tag :attrs (keys attrs)}))
+          (doseq [k (keys attrs)]
+            (when-not (contains? allowed k)
+              (throw (ex-info (str "glimmer/markup: :" (name k)
+                                   " is not a :" (name tag) " attribute")
+                              {:tag tag :attr k}))))))
+      (run! markup-validate! children))))
+
+(defn- markup-validate! [form]
+  (cond
+    (markup-element? form)  (markup-validate-element! form)
+    (sequential? form)      (run! markup-validate! form)
+    :else                   nil))
+
+(defn markup
+  "Render hiccup `form` to a Pango markup string for a label's :markup prop.
+
+  [:span {:foreground \"#8e939d\"} \"Nothing to do yet\"]
+  [:b [:i \"bold italic\"]]
+
+  Serialization (escaping, seq expansion) is delegated to hiccup; the data is
+  first validated against Pango's tag/attribute vocabulary, so an HTML-only tag
+  (:div, :br) or a typo'd attribute (:forground) throws here rather than
+  producing markup gtk_label_set_markup can't parse. Pango attribute names use
+  underscores (:font_family, :letter_spacing) to match Pango's own spelling."
+  [form]
+  (markup-validate! form)
+  (str (hiccup/html form)))
 
 ;; Resolve a property that may be a GEnum nick keyword (:start, :fill) OR a raw
 ;; integer. genum/enum returns nil when the type isn't live yet or the nick is

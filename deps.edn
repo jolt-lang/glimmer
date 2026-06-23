@@ -1,5 +1,9 @@
 {:paths ["src"]
 
+ :deps {weavejester/hiccup
+        {:git/url "https://github.com/weavejester/hiccup"
+         :git/sha "b6b12097ba973141fe87c1b4d6a27ddcce5d5929"}}
+
  ;; GTK4 and its GLib dependencies, bound natively via jolt.ffi. The shared
  ;; libraries are declared below; jolt loads them before the namespaces are
  ;; required. GTK4 links GLib/GObject/GIO transitively, but on macOS's
