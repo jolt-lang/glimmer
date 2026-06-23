@@ -35,6 +35,25 @@
       {:tag tag :props (first body) :children (vec (rest body))}
       {:tag tag :props {} :children (vec body)})))
 
+;; A parent's child forms can mix elements, nil holes (`(when cond ...)`) and
+;; spliced seqs (`(for ...)`, list). Normalize to a flat vector of elements
+;; before positional diffing: splice (possibly nested) seqs, drop nils. A bare
+;; vector is NOT spliced — it is itself one child element (standard hiccup).
+(defn- walk-child
+  [acc x]
+  (cond
+    (nil? x)  acc
+    (seq? x)  (reduce walk-child acc x)
+    :else     (conj acc x)))
+
+(defn flatten-children
+  "Normalize a parent's child forms into a flat vector of hiccup elements.
+  Splices (possibly nested) seqs and drops nils, so `(for [t tasks] [row t])`
+  renders one widget per task and `(when cond [...])` leaves no hole. Bare
+  vectors are kept as single children."
+  [xs]
+  (reduce walk-child [] xs))
+
 ;; --- instance tree -----------------------------------------------------------
 ;; Each rendered element has an atom holding its instance state:
 ;;   native: {:type :native :tag :button :props {} :widget <ptr> :children [atom...]}
@@ -46,18 +65,20 @@
 (defn- destroy-inst!
   "Remove an instance's widget from its parent and recursively destroy children."
   [inst-atom parent-widget parent-tag]
-  (let [inst @inst-atom
-        widget (:widget inst)]
-    (when widget
-      (w/remove-child! parent-tag parent-widget widget))
-    (doseq [child (:children inst)]
-      (destroy-inst! child widget (:tag inst)))))
+  (when inst-atom
+    (let [inst @inst-atom
+          widget (:widget inst)]
+      (when widget
+        (w/remove-child! parent-tag parent-widget widget))
+      (doseq [child (:children inst)]
+        (destroy-inst! child widget (:tag inst))))))
 
 (defn- reconcile-children!
   "Positionally reconcile `new-children` (hiccup) against the instance's existing
   children, reusing widgets where the element shape matches at a position."
   [parent-widget parent-tag new-children inst-atom]
-  (let [old (:children @inst-atom)
+  (let [new-children (flatten-children new-children)
+        old (:children @inst-atom)
         n (count new-children)
         ;; reuse the child atom at each position when it exists; else a fresh one
         reused (vec (for [i (range n)]
@@ -93,8 +114,20 @@
   callable, so ifn? would treat every Form-1 result as a Form-2 render fn."
   [parent-widget parent-tag v inst-atom]
   (let [f (first v) args (rest v)
-        cached-render-fn (:render-fn @inst-atom)]
-    (swap! inst-atom (fn [cur] (if (:children cur) cur (assoc cur :children [(atom nil)]))))
+        cur @inst-atom
+        cached-render-fn (:render-fn cur)]
+    ;; native -> comp: a component has no widget of its own, so a native element
+    ;; previously mounted here would be left parented behind the expanded child.
+    ;; Reset to a fresh comp skeleton — its native :type/:tag/:widget must NOT
+    ;; survive, or a later comp->native transition would mistake the stale :type
+    ;; and deref a nil :widget.
+    (when (and (:widget cur) (not= :comp (:type cur)))
+      (w/remove-child! parent-tag parent-widget (:widget cur))
+      (reset! inst-atom {:children [(atom nil)]}))
+    ;; ensure exactly one child slot for the expanded root. Use `seq`, not
+    ;; truthiness: a native leaf carries :children [], which is truthy but empty —
+    ;; (first []) is nil, and reconcile-el! would deref it (the clear-all crash).
+    (swap! inst-atom (fn [c] (if (seq (:children c)) c (assoc c :children [(atom nil)]))))
     (let [child-atom (first (:children @inst-atom))
           ;; subscribe: any reactive read during render re-runs just this component.
           ;; The watcher is cached on the instance so it's the SAME fn every render;
