@@ -109,9 +109,24 @@
 (defn- ->orientation [x] (->enum "GtkOrientation" x))
 
 ;; --- tag aliases (sugar) -----------------------------------------------------
+;; :hbox / :vbox are both GtkBox; the difference is orientation. normalize-tag
+;; maps them to the :box spec, and with-orientation injects the matching
+;; :orientation so a bare [:hbox ...] actually lays out horizontally (the box
+;; ctor builds vertical by default and :apply corrects it). An explicit
+;; :orientation in props always wins.
 (def ^:private aliases {:hbox :box :vbox :box})
 
+(def ^:private tag-orientation {:hbox :horizontal :vbox :vertical})
+
 (defn- normalize-tag [tag] (get aliases tag tag))
+
+(defn with-orientation
+  "Inject the orientation implied by an :hbox/:vbox tag into its props, unless the
+  caller already set :orientation. A no-op for any other tag."
+  [tag props]
+  (if-let [o (tag-orientation tag)]
+    (if (contains? props :orientation) props (assoc props :orientation o))
+    props))
 
 ;; --- signal registry ---------------------------------------------------------
 ;; event keyword -> GTK signal name. A handler has the GTK signature
@@ -316,7 +331,8 @@
   handlers. Returns the widget pointer. Note: children are NOT added here — the
   reconciler appends them so it can reuse existing children across renders."
   [tag props]
-  (let [s (spec-for tag)
+  (let [props (with-orientation tag props)
+        s (spec-for tag)
         widget ((:ctor s) props)]
     ((:apply s) widget props)
     (apply-widget-props! widget props)
@@ -327,7 +343,8 @@
   "Re-apply the prop map to an existing widget (re-render path). Skips :on-* keys
   (signals stay wired from mount) and keys whose value is nil."
   [tag widget props]
-  (let [applied (into {} (filter (fn [[k v]] (and (not (signals k)) (some? v))) props))]
+  (let [applied (into {} (filter (fn [[k v]] (and (not (signals k)) (some? v)))
+                                 (with-orientation tag props)))]
     ((:apply (spec-for tag)) widget applied)
     (apply-widget-props! widget applied)))
 

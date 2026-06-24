@@ -37,6 +37,19 @@
     (is (= "<span foreground=\"a&quot;b\">x</span>"
            (w/markup [:span {:foreground "a\"b"} "x"])))))
 
+;; :hbox/:vbox are GtkBox; orientation distinguishes them. with-orientation
+;; injects it from the tag so a bare [:hbox ...] lays out horizontally.
+(deftest with-orientation-injects-from-tag
+  (testing ":hbox gets horizontal"
+    (is (= {:spacing 8 :orientation :horizontal} (w/with-orientation :hbox {:spacing 8}))))
+  (testing ":vbox gets vertical"
+    (is (= {:orientation :vertical} (w/with-orientation :vbox {}))))
+  (testing "an explicit :orientation in props always wins"
+    (is (= {:orientation :vertical} (w/with-orientation :hbox {:orientation :vertical}))))
+  (testing "non-box tags are untouched"
+    (is (= {:label "x"} (w/with-orientation :button {:label "x"})))
+    (is (= {} (w/with-orientation :box {})))))
+
 (deftest markup-rejects-things-pango-cannot-parse
   (testing "unsupported tag (e.g. an HTML-only tag) throws"
     (is (thrown? Exception (w/markup [:div "x"])))
