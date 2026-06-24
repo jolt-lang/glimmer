@@ -181,7 +181,7 @@
                     (g/gtk-checkbutton-new-with-label (:label p))
                     (g/gtk-checkbutton-new)))
    :apply (fn [w p]
-            (when (contains? p :active) (g/gtk-checkbutton-set-active w (->bool (:active p)))))
+            (when (contains? p :active) (set-checkbutton-active! w (:active p))))
    :container :none})
 
 (defn- separator-spec []
@@ -233,10 +233,11 @@
   so it isn't collected while C (GTK) still holds only the raw pointer."
   [cb] (swap! callables conj cb) cb)
 
-;; Widgets whose "changed" signal we are currently firing ourselves (via
-;; gtk_editable_set_text). The :on-change handler ignores emissions for these, so
-;; a programmatic set_text can't feed back into a reset!/re-render loop. GTK emits
-;; "changed" synchronously during set_text, so a plain add-around-call-disj works.
+;; Widgets whose signal we are currently firing ourselves (via a programmatic
+;; setter — gtk_editable_set_text, gtk_check_button_set_active). connect-signals
+;; gates handlers on this set, so a programmatic prop change can't feed back into
+;; a reset!/re-render loop. GTK emits the signal synchronously during the setter,
+;; so a plain conj-around-call-disj brackets exactly the spurious emission.
 (def ^:private suppressing (atom #{}))
 
 (defn- set-entry-text!
@@ -248,6 +249,20 @@
     (swap! suppressing conj widget)
     (g/gtk-editable-set-text widget text)
     (swap! suppressing disj widget)))
+
+(defn- set-checkbutton-active!
+  "Set a checkbutton's active state, but only when it differs from the widget's
+  current state, and while suppressing the :on-toggled handler for the synchronous
+  'toggled' emission gtk_check_button_set_active causes. Without this, a bulk
+  update (e.g. 'complete all' flipping every task's :done) would re-render each
+  row, set_active would fire 'toggled', and the row's handler would flip the task
+  straight back."
+  [widget active?]
+  (let [target (->bool active?)]
+    (when (not= target (g/gtk-checkbutton-get-active widget))
+      (swap! suppressing conj widget)
+      (g/gtk-checkbutton-set-active widget target)
+      (swap! suppressing disj widget))))
 
 ;; Which signals carry a value the handler wants: GTK signal name -> (fn [widget] value)
 (def ^:private signal-value
@@ -266,7 +281,10 @@
       (let [value-fn (signal-value signal)
             cb (ffi/foreign-callable
                  (fn [src-widget _data]
-                   (if value-fn (handler (value-fn src-widget)) (handler)))
+                   ;; skip emissions we triggered ourselves via a programmatic
+                   ;; setter (see `suppressing`) so they can't loop back.
+                   (when-not (contains? @suppressing src-widget)
+                     (if value-fn (handler (value-fn src-widget)) (handler))))
                  [:pointer :pointer] :void :collect-safe)]
         (swap! callables conj cb)
         (g/g-signal-connect-data widget signal cb ffi/null ffi/null g/CONNECT-DEFAULT)))))

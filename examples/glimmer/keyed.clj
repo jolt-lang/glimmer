@@ -26,10 +26,15 @@
 (def failures (atom []))
 (def result (atom :pending))
 
+;; Rows are COMPONENTS (not native elements) so the smoke also covers keyed
+;; reconciliation of component children — whose contributed widget lives one
+;; level down on the expanded child, the case bare-label rows wouldn't exercise.
+(defn- row [text] [:label {:label text :halign :start}])
+
 (defn app []
   (into [:vbox {:spacing 6 :margin 16}]
         (for [{:keys [id text]} @items]
-          [:label {:key id :label text :halign :start}]))) ; keyed by :id
+          [row {:key id} text]))) ; keyed by :id
 
 ;; --- reading the live tree ---------------------------------------------------
 ;; GTK child pointers in visual order: first-child, then next-sibling until NULL
@@ -38,14 +43,19 @@
   (loop [c (g/gtk-widget-get-first-child box) acc []]
     (if (zero? c) acc (recur (g/gtk-widget-get-next-sibling c) (conj acc c)))))
 
+;; The widget an instance contributes: its own :widget, or (for a component) the
+;; widget of its single expanded child. Mirrors glimmer.core/inst-widget.
+(defn- inst-widget [a]
+  (let [i @a] (or (:widget i) (some-> (first (:children i)) inst-widget))))
+
 ;; The mounted vbox lives one level under the root component (a component owns no
 ;; widget of its own — its single child atom holds the expanded native vbox).
 (defn- vbox-atom [root] (first (:children @root)))
-(defn- vbox-widget [root] (:widget @(vbox-atom root)))
+(defn- vbox-widget [root] (inst-widget (vbox-atom root)))
 
 ;; key -> widget pointer, read from the reconciler's own instance tree.
 (defn- key->widget [root]
-  (into {} (map (fn [a] (let [i @a] [(:key i) (:widget i)])) (:children @(vbox-atom root)))))
+  (into {} (map (fn [a] [(:key @a) (inst-widget a)]) (:children @(vbox-atom root)))))
 
 ;; --- assertions --------------------------------------------------------------
 (defn- record! [ok? label]
@@ -82,7 +92,18 @@
     (check-order! root [:d :c :a] w0 "insert")
     (let [now (key->widget root)]
       (record! (contains? now :d) "insert :d-present")
-      (record! (not (contains? w0 (now :d))) "insert :d-is-new"))))
+      (record! (not (contains? w0 (now :d))) "insert :d-is-new")))
+
+  ;; Checkbutton suppression: a programmatic :active change (the re-render after a
+  ;; bulk op like "complete all") must NOT fire :on-toggled, or each row's handler
+  ;; would flip the task straight back. Build one through the widget layer with a
+  ;; counting handler, flip :active a few times via apply-props!, expect 0 fires.
+  (let [hits (atom 0)
+        cb   (w/create! :checkbutton {:active false :on-toggled (fn [] (swap! hits inc))})]
+    (w/apply-props! :checkbutton cb {:active true})
+    (w/apply-props! :checkbutton cb {:active false})
+    (w/apply-props! :checkbutton cb {:active true})
+    (record! (zero? @hits) (str "checkbutton-suppress fired=" @hits))))
 
 (defn- driver [root app-obj]
   (w/retain-callable!

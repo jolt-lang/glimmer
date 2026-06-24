@@ -124,8 +124,22 @@
 
 (declare reconcile-el!)
 
+(defn- inst-widget
+  "The GTK widget an instance contributes to its parent container: a native
+  instance's own :widget, or — for a component, which owns no widget — the widget
+  of its single expanded child (recursing, since a component can expand to another
+  component). nil if nothing is mounted yet."
+  [inst-atom]
+  (when inst-atom
+    (let [inst @inst-atom]
+      (or (:widget inst)
+          (some-> (first (:children inst)) inst-widget)))))
+
 (defn- destroy-inst!
-  "Remove an instance's widget from its parent and recursively destroy children."
+  "Remove an instance's widget from its parent and recursively destroy children.
+  A component owns no widget, so its children are parented in the component's own
+  container — recurse with `parent-widget`/`parent-tag` in that case (not the
+  inst's nil widget), or the child widget would be orphaned rather than removed."
   [inst-atom parent-widget parent-tag]
   (when inst-atom
     (let [inst @inst-atom
@@ -133,7 +147,7 @@
       (when widget
         (w/remove-child! parent-tag parent-widget widget))
       (doseq [child (:children inst)]
-        (destroy-inst! child widget (:tag inst))))))
+        (destroy-inst! child (or widget parent-widget) (or (:tag inst) parent-tag))))))
 
 (defn- reconcile-positional-children!
   "Positionally reconcile `new-children` (a flattened vector of hiccup) against the
@@ -160,7 +174,9 @@
   needed. Repositioning does not recreate widgets, so signal handlers and the
   instance atoms stay intact. No-op for non-box containers."
   [parent-widget parent-tag child-atoms]
-  (let [widgets (vec (map (fn [a] (:widget @a)) child-atoms))
+  ;; resolve each child to its contributed widget — a keyed child may be a
+  ;; component, whose widget lives one level down on its expanded child.
+  (let [widgets (vec (map inst-widget child-atoms))
         n (count widgets)]
     (when (pos? n)
       (doseq [i (range n)]
