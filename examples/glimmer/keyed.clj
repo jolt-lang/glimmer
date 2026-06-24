@@ -26,10 +26,14 @@
 (def failures (atom []))
 (def result (atom :pending))
 
-;; Rows are COMPONENTS (not native elements) so the smoke also covers keyed
+;; Rows are COMPONENTS (not native elements) so the smoke covers keyed
 ;; reconciliation of component children — whose contributed widget lives one
-;; level down on the expanded child, the case bare-label rows wouldn't exercise.
-(defn- row [text] [:label {:label text :halign :start}])
+;; level down on the expanded child. The expansion is a box WITH a child (not a
+;; bare label) so destroying a row exercises the recurse-through-component path
+;; without re-removing grandchildren from an already-finalized box.
+(defn- row [text]
+  [:hbox {:spacing 4 :halign :start}
+   [:label {:label text}]])
 
 (defn app []
   (into [:vbox {:spacing 6 :margin 16}]

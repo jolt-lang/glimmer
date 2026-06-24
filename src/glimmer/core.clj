@@ -136,18 +136,20 @@
           (some-> (first (:children inst)) inst-widget)))))
 
 (defn- destroy-inst!
-  "Remove an instance's widget from its parent and recursively destroy children.
-  A component owns no widget, so its children are parented in the component's own
-  container — recurse with `parent-widget`/`parent-tag` in that case (not the
-  inst's nil widget), or the child widget would be orphaned rather than removed."
+  "Remove the widget an instance contributes from `parent-widget`. A native
+  instance owns its widget: removing it unparents the whole subtree, so we stop —
+  recursing into its children would call gtk_box_remove on a container GTK has
+  already finalized (the source of GTK_IS_BOX criticals). A component owns no
+  widget, so its expanded children are parented in the component's own container;
+  recurse with the same parent to remove them from there."
   [inst-atom parent-widget parent-tag]
   (when inst-atom
     (let [inst @inst-atom
           widget (:widget inst)]
-      (when widget
-        (w/remove-child! parent-tag parent-widget widget))
-      (doseq [child (:children inst)]
-        (destroy-inst! child (or widget parent-widget) (or (:tag inst) parent-tag))))))
+      (if widget
+        (w/remove-child! parent-tag parent-widget widget)
+        (doseq [child (:children inst)]
+          (destroy-inst! child parent-widget parent-tag))))))
 
 (defn- reconcile-positional-children!
   "Positionally reconcile `new-children` (a flattened vector of hiccup) against the
