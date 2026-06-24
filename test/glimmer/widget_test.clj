@@ -37,6 +37,15 @@
     (is (= "<span foreground=\"a&quot;b\">x</span>"
            (w/markup [:span {:foreground "a\"b"} "x"])))))
 
+;; markup-string coerces a :markup prop: strings pass through, hiccup renders.
+(deftest markup-string-coerces-prop
+  (testing "a string is already markup — passed through verbatim"
+    (is (= "<b>x</b>" (w/markup-string "<b>x</b>")))
+    (is (= "plain" (w/markup-string "plain"))))
+  (testing "hiccup is rendered (and its text escaped) via markup"
+    (is (= "<span foreground=\"#888\">a &amp; b</span>"
+           (w/markup-string [:span {:foreground "#888"} "a & b"])))))
+
 ;; :hbox/:vbox are GtkBox; orientation distinguishes them. with-orientation
 ;; injects it from the tag so a bare [:hbox ...] lays out horizontally.
 (deftest with-orientation-injects-from-tag

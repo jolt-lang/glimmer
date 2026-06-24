@@ -97,6 +97,14 @@
   (markup-validate! form)
   (str (hiccup/html form)))
 
+(defn markup-string
+  "Coerce a label's :markup prop to a Pango markup string. A string passes through
+  as-is (already markup); anything else is treated as hiccup and rendered via
+  `markup` — so a [:label {:markup [:span ...]}] is validated and has its text
+  escaped instead of the caller hand-rolling the XML."
+  [m]
+  (if (string? m) m (markup m)))
+
 ;; Resolve a property that may be a GEnum nick keyword (:start, :fill) OR a raw
 ;; integer. genum/enum returns nil when the type isn't live yet or the nick is
 ;; unknown; in that case fall back to the raw value (so callers can still pass
@@ -174,7 +182,7 @@
    :apply (fn [w p]
             (when (contains? p :label)  (g/gtk-label-set-label w (:label p)))
             (when (contains? p :text)   (g/gtk-label-set-text w (:text p)))
-            (when (contains? p :markup) (g/gtk-label-set-markup w (:markup p)))
+            (when (contains? p :markup) (g/gtk-label-set-markup w (markup-string (:markup p))))
             (when (contains? p :xalign) (g/gtk-label-set-xalign w (:xalign p)))
             (when (contains? p :wrap)   (g/gtk-label-set-wrap w (->bool (:wrap p))))
             (when (contains? p :width-chars)     (g/gtk-label-set-width-chars w (:width-chars p)))
