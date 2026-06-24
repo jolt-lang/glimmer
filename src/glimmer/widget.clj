@@ -350,3 +350,13 @@
     :frame  (g/gtk-frame-set-child parent new-child)
     :scrolled (g/gtk-scrolled-window-set-child parent new-child)
     nil))
+
+(defn reorder-child!
+  "Move `child` to sit immediately after `sibling` (nil = move to first position)
+  within `parent`. Only GtkBox supports positional reordering; the single-child
+  containers (window/frame/scrolled) no-op. Used by the keyed reconciler to fix
+  widget order after reuse/create when survivors were reordered or a new item
+  must precede an existing one."
+  [parent-tag parent child sibling]
+  (when (= :box (container-kind parent-tag))
+    (g/gtk-box-reorder-child-after parent child (or sibling ffi/null))))

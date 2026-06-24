@@ -45,9 +45,11 @@
  :aliases {:test    {:extra-paths ["test"]     :main-opts ["-m" "glimmer.test-runner"]}
            :counter {:extra-paths ["examples"] :main-opts ["-m" "glimmer.counter"]}
            :todo    {:extra-paths ["examples"] :main-opts ["-m" "glimmer.todo"]}
-           :smoke   {:extra-paths ["examples"] :main-opts ["-m" "glimmer.reactivity-smoke"]}}
+           :smoke   {:extra-paths ["examples"] :main-opts ["-m" "glimmer.reactivity-smoke"]}
+           :keyed   {:extra-paths ["examples"] :main-opts ["-m" "glimmer.keyed"]}}
 
  :tasks {test    "joltc -M:test"
          counter "joltc -M:counter"
          todo    "joltc -M:todo"
-         smoke   "joltc -M:smoke"}}
+         smoke   "joltc -M:smoke"
+         keyed   "joltc -M:keyed"}}

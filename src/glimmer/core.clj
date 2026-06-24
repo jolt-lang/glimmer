@@ -30,9 +30,10 @@
 
 ;; --- hiccup parsing ----------------------------------------------------------
 (defn- parse-native [v]
-  (let [tag (first v) body (next v)]
-    (if (and (seq body) (map? (first body)))
-      {:tag tag :props (first body) :children (vec (rest body))}
+  (let [tag (first v) body (next v)
+        props (when (and (seq body) (map? (first body))) (first body))]
+    (if props
+      {:tag tag :props (dissoc props :key) :children (vec (rest body))}
       {:tag tag :props {} :children (vec body)})))
 
 ;; A parent's child forms can mix elements, nil holes (`(when cond ...)`) and
@@ -54,6 +55,67 @@
   [xs]
   (reduce walk-child [] xs))
 
+;; --- keyed children (pure planning) ------------------------------------------
+;; Keyed reconciliation matches children by a stable :key instead of by position,
+;; so list items can be added, removed or reordered without a handler capturing a
+;; stale index. The planning below is pure (operates on keys, not widgets) so it
+;; is unit-testable headlessly; the GTK wiring lives in reconcile-children!.
+
+(defn child-key
+  "The stable identity of a child element used by keyed reconciliation, or nil
+  when the child is unkeyed. Taken from :key in the element's props map (a native
+  [:tag {:key k}] or a component invocation [f {:key k} ...]) or, failing that,
+  from ^{:key k} metadata on the vector — mirroring reagent. Non-vector children
+  (strings, numbers, nil) are never keyed."
+  [el]
+  (when (vector? el)
+    (or (-> el meta :key)
+        (let [body (next el)]
+          (when (and (seq body) (map? (first body)))
+            (:key (first body)))))))
+
+(defn keyed?
+  "True when every child in `children` (a flat list of hiccup elements) carries a
+  non-nil key. An empty list is not keyed — the positional path handles the
+  no-children case. Mixed keyed/unkeyed lists fall back to positional so an
+  accidental missing key never silently mis-reconciles."
+  [children]
+  (boolean (and (seq children)
+                (every? #(some? (child-key %)) children))))
+
+(defn- strictly-increasing? [xs]
+  ;; `(apply < [])` throws in jolt (< needs >=1 arg), so treat empty as vacuously
+  ;; increasing — a list with no reused widgets needs no reorder.
+  (or (empty? xs) (apply < xs)))
+
+(defn keyed-plan
+  "Pure diff of old vs new child keys -> a reconcile plan the keyed path applies
+  against GTK widgets. `old-keys`/`new-keys` are the keys of the previously-
+  mounted and newly-requested children, in order. Returns a map:
+    :destroy  [old-index ...]                                keys gone from new
+    :slots    [{:key, :kind :reuse|:create, :old-index?}]    in target order
+    :reorder? boolean                                         widget reorder needed
+  :reorder? is false when surviving widgets already sit in the right relative
+  order with new ones appended after them (GTK appends to the tail); true
+  otherwise — e.g. survivors were reordered, or a new item must appear before an
+  existing one."
+  [old-keys new-keys]
+  (let [old-idx  (into {} (map-indexed (fn [i k] [k i]) old-keys))
+        new-set  (set new-keys)
+        destroy  (vec (for [[i k] (map-indexed vector old-keys)
+                            :when (not (new-set k))] i))
+        slots    (vec (for [k new-keys]
+                        (if-let [oi (old-idx k)]
+                          {:key k :kind :reuse :old-index oi}
+                          {:key k :kind :create})))
+        reuse-old (vec (keep :old-index (filter #(= :reuse (:kind %)) slots)))
+        create-pos (keep-indexed (fn [i s] (when (= :create (:kind s)) i)) slots)
+        reuse-pos  (keep-indexed (fn [i s] (when (= :reuse (:kind s)) i)) slots)
+        create-before-reuse (and (seq create-pos) (seq reuse-pos)
+                                 (< (apply min create-pos) (apply max reuse-pos)))
+        reorder? (boolean (or (not (strictly-increasing? reuse-old)) create-before-reuse))]
+    {:destroy destroy :slots slots :reorder? reorder?}))
+
 ;; --- instance tree -----------------------------------------------------------
 ;; Each rendered element has an atom holding its instance state:
 ;;   native: {:type :native :tag :button :props {} :widget <ptr> :children [atom...]}
@@ -73,12 +135,12 @@
       (doseq [child (:children inst)]
         (destroy-inst! child widget (:tag inst))))))
 
-(defn- reconcile-children!
-  "Positionally reconcile `new-children` (hiccup) against the instance's existing
-  children, reusing widgets where the element shape matches at a position."
+(defn- reconcile-positional-children!
+  "Positionally reconcile `new-children` (a flattened vector of hiccup) against the
+  instance's existing children, reusing widgets where the element shape matches at
+  a position. The default path when children are not uniformly keyed."
   [parent-widget parent-tag new-children inst-atom]
-  (let [new-children (flatten-children new-children)
-        old (:children @inst-atom)
+  (let [old (:children @inst-atom)
         n (count new-children)
         ;; reuse the child atom at each position when it exists; else a fresh one
         reused (vec (for [i (range n)]
@@ -90,6 +152,69 @@
     (doseq [i (range n)]
       (reconcile-el! parent-widget parent-tag (nth new-children i) (nth reused i)))
     (swap! inst-atom assoc :children reused)))
+
+(defn- reorder-keyed-widgets!
+  "Force `child-atoms`' widgets into the given order within the parent, using
+  gtk_box_reorder_child_after (each widget moved to sit after the previous one;
+  the first goes to position 0). Called only when keyed-plan says a reorder is
+  needed. Repositioning does not recreate widgets, so signal handlers and the
+  instance atoms stay intact. No-op for non-box containers."
+  [parent-widget parent-tag child-atoms]
+  (let [widgets (vec (map (fn [a] (:widget @a)) child-atoms))
+        n (count widgets)]
+    (when (pos? n)
+      (doseq [i (range n)]
+        (let [w (nth widgets i)
+              prev (when (pos? i) (nth widgets (dec i)))]
+          (w/reorder-child! parent-tag parent-widget w prev))))))
+
+(defn- reconcile-keyed-children!
+  "Reconcile uniformly-keyed `new-children` (a flattened vector of hiccup, each
+  carrying a non-nil :key) by stable identity rather than position. Derives a
+  reuse/create/reorder plan from keyed-plan, destroys removed children, reuses
+  surviving atoms by key, creates fresh atoms for new keys, re-applies each
+  child's hiccup into its atom, and fixes widget order when the plan requires it.
+  Stores the child's :key on its instance so the next render can read old keys
+  back — that is how a row's widget and signal handlers follow the item across
+  add/remove/reorder instead of a stale position."
+  [parent-widget parent-tag new-children inst-atom]
+  (let [old (:children @inst-atom)
+        ;; raw old keys keep nils on purpose: a nil-keyed legacy child (mounted
+        ;; before this parent became keyed) is absent from new-set, so keyed-plan
+        ;; destroys it rather than orphaning its widget in the container.
+        old-keys (vec (map (fn [a] (:key @a)) old))
+        new-keys (vec (map child-key new-children))
+        plan (keyed-plan old-keys new-keys)
+        destroy (:destroy plan)
+        slots (:slots plan)
+        reorder? (:reorder? plan)
+        ;; reuse lookups are by key; nil-keyed old children are never reused
+        old-by-key (into {} (keep (fn [a] (when-let [k (:key @a)] [k a])) old))]
+    (doseq [i destroy]
+      (destroy-inst! (nth old i) parent-widget parent-tag))
+    (let [child-atoms (vec (for [slot slots]
+                             (if (= :reuse (:kind slot))
+                               (get old-by-key (:key slot))
+                               (atom nil))))]
+      (doseq [i (range (count child-atoms))]
+        (let [a (nth child-atoms i)]
+          (reconcile-el! parent-widget parent-tag (nth new-children i) a)
+          (swap! a assoc :key (nth new-keys i))))
+      (when reorder?
+        (reorder-keyed-widgets! parent-widget parent-tag child-atoms))
+      (swap! inst-atom assoc :children child-atoms))))
+
+(defn- reconcile-children!
+  "Reconcile `new-children` (hiccup) against the instance's existing children.
+  When every child carries a stable :key, reconcile by identity — a row's widget
+  and signal handlers follow its key across add/remove/reorder, so a handler may
+  safely close over per-item state. Otherwise fall back to positional matching.
+  `new-children` is flattened first."
+  [parent-widget parent-tag new-children inst-atom]
+  (let [flat (flatten-children new-children)]
+    (if (keyed? flat)
+      (reconcile-keyed-children! parent-widget parent-tag flat inst-atom)
+      (reconcile-positional-children! parent-widget parent-tag flat inst-atom))))
 
 (defn- reconcile-native!
   [parent-widget parent-tag v inst-atom]
@@ -113,7 +238,15 @@
   is re-applied each render. We classify with fn?, not ifn? — a hiccup vector is
   callable, so ifn? would treat every Form-1 result as a Form-2 render fn."
   [parent-widget parent-tag v inst-atom]
-  (let [f (first v) args (rest v)
+  (let [f (first v)
+        ;; strip a leading {:key k} so it never reaches the component fn — mirrors
+        ;; parse-native. A key-only map drops entirely; a map mixing :key with real
+        ;; props drops just :key. Non-map / key-less leading args are untouched.
+        args (let [raw (rest v)]
+               (if (and (seq raw) (map? (first raw)) (contains? (first raw) :key))
+                 (let [m (dissoc (first raw) :key)]
+                   (if (seq m) (cons m (rest raw)) (rest raw)))
+                 raw))
         cur @inst-atom
         cached-render-fn (:render-fn cur)]
     ;; native -> comp: a component has no widget of its own, so a native element

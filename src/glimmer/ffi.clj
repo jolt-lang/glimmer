@@ -64,6 +64,13 @@
 (ffi/defcfn gtk-orientable-set-orientation "gtk_orientable_set_orientation" [:pointer :int] :void)
 (ffi/defcfn gtk-box-set-homogeneous  "gtk_box_set_homogeneous"  [:pointer :int] :void)
 
+;; --- widget tree traversal ---------------------------------------------------
+;; Walk a container's children in visual order: get_first_child, then
+;; get_next_sibling until it returns NULL (0). Lets tests/examples read GTK's
+;; actual child order back (e.g. to verify keyed reordering).
+(ffi/defcfn gtk-widget-get-first-child  "gtk_widget_get_first_child"  [:pointer] :pointer)
+(ffi/defcfn gtk-widget-get-next-sibling "gtk_widget_get_next_sibling" [:pointer] :pointer)
+
 ;; --- widgets -----------------------------------------------------------------
 (ffi/defcfn gtk-button-new              "gtk_button_new"              [] :pointer)
 (ffi/defcfn gtk-button-new-with-label   "gtk_button_new_with_label"   [:string] :pointer)
