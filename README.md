@@ -155,12 +155,35 @@ Five namespaces:
   (`:start`, `:fill`) to their integer values at runtime via the GObject type
   registry, so the library needs no enum-constant tables.
 - **`glimmer.widget`** — hiccup to GTK: tag to constructor, props to setters,
-  `:on-*` to GTK signals wired through `foreign-callable`.
+  `:on-*` to GTK signals wired through `foreign-callable`. The tag and signal
+  registries are open: `register-widget!` adds a widget spec for a new tag (with
+  an optional `:connect` hook for signals that don't fit the uniform
+  `void(widget, data)` shape), and `register-signal!` maps a new `:on-*` event to
+  a GTK signal. This is how `glimmer-gl` adds `:gl-area` and `:scale` without
+  forking glimmer.
 - **`glimmer.core`** — the component model, positional reconciler, and the
   `g_application_run` app loop.
 
 The reactive model is a port of the one in
 [mr-clean](https://github.com/clojure-ic/mr-clean).
+
+## Extending the widget set
+
+A consumer can teach glimmer new hiccup tags at load time:
+
+```clojure
+(require '[glimmer.widget :as w])
+
+(w/register-widget! :my-thing
+  {:ctor      (fn [props] (make-the-gtk-widget props))
+   :apply     (fn [widget props] (re-apply props on re-render))
+   :container :none})          ; or :box / :window / :frame / :scrolled
+
+(w/register-signal! :on-input "value-changed"
+                    (fn [widget] (read-the-value widget)))  ; value-fn optional
+```
+
+See `glimmer-gl.gtk` for a worked example (`:gl-area`, `:scale`).
 
 ## Status
 

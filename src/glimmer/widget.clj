@@ -139,12 +139,13 @@
 ;; --- signal registry ---------------------------------------------------------
 ;; event keyword -> GTK signal name. A handler has the GTK signature
 ;; void(widget, user_data); our callable ignores both args and invokes the
-;; captured jolt handler, so one table covers every widget type.
+;; captured jolt handler, so one table covers every widget type. An atom so
+;; extensions (glimmer-gl's :scale) can add events via register-signal!.
 (def signals
-  {:on-click     "clicked"
-   :on-change    "changed"
-   :on-activate  "activate"
-   :on-toggled   "toggled"})
+  (atom {:on-click     "clicked"
+         :on-change    "changed"
+         :on-activate  "activate"
+         :on-toggled   "toggled"}))
 
 ;; --- widget specs ------------------------------------------------------------
 ;; Each spec: {:ctor (fn [props] widget-ptr) :apply (fn [widget props]) :container (#{:box :window :none})}
@@ -228,18 +229,30 @@
    :apply    (fn [_ _])
    :container :scrolled})
 
-(def ^:private specs
-  {:window      (window-spec)
-   :box         (box-spec)
-   :button      (button-spec)
-   :label       (label-spec)
-   :entry       (entry-spec)
-   :checkbutton (checkbutton-spec)
-   :separator   (separator-spec)
-   :frame       (frame-spec)
-   :scrolled    (scrolled-spec)})
+;; hiccup tag -> widget spec. An atom so extensions register new widget types
+;; (glimmer-gl's :gl-area, :scale) via register-widget! without editing this ns.
+(def specs
+  (atom {:window      (window-spec)
+         :box         (box-spec)
+         :button      (button-spec)
+         :label       (label-spec)
+         :entry       (entry-spec)
+         :checkbutton (checkbutton-spec)
+         :separator   (separator-spec)
+         :frame       (frame-spec)
+         :scrolled    (scrolled-spec)}))
 
-(defn- spec-for [tag] (specs (normalize-tag tag)))
+(defn register-widget!
+  "Register a widget spec under hiccup `tag`. A spec is
+  {:ctor (fn [props] widget) :apply (fn [widget props]) :container kw
+   :connect (fn [widget props])?}. :container is :none for a leaf, or :box /
+   :window / :frame / :scrolled to reuse an existing child-management strategy.
+  The optional :connect runs at create! time after the generic :on-* wiring, for
+  widgets whose signals don't fit the uniform void(widget,data) shape (e.g. a
+  GtkGLArea's realize/render/resize)."
+  [tag spec] (swap! specs assoc tag spec) nil)
+
+(defn- spec-for [tag] (@specs (normalize-tag tag)))
 
 (defn container-kind
   "How a tag holds children: :box (ordered append/remove), :window (single child),
@@ -287,9 +300,22 @@
       (g/gtk-checkbutton-set-active widget target)
       (swap! suppressing disj widget))))
 
-;; Which signals carry a value the handler wants: GTK signal name -> (fn [widget] value)
+;; Which signals carry a value the handler wants: GTK signal name -> (fn [widget] value).
+;; An atom so an extension can register a value-bearing signal (e.g. a slider's
+;; "value-changed" delivering the current double) without editing this table.
 (def ^:private signal-value
-  {"changed" (fn [widget] (g/gtk-editable-get-text widget))})
+  (atom {"changed" (fn [widget] (g/gtk-editable-get-text widget))}))
+
+(defn register-signal!
+  "Register an :on-* event key -> GTK signal name. With `value-fn` (a widget ->
+  value fn) the handler is called with that value instead of zero args — used by
+  value-bearing widgets (e.g. glimmer-gl's :scale slider). Lets extensions add
+  widget events without editing glimmer.widget."
+  ([event gtk-signal] (register-signal! event gtk-signal nil))
+  ([event gtk-signal value-fn]
+   (swap! signals assoc event gtk-signal)
+   (when value-fn (swap! signal-value assoc gtk-signal value-fn))
+   nil))
 
 (defn connect-signals!
   "For every :on-* key in `props`, wrap its handler in a :collect-safe
@@ -300,8 +326,8 @@
   the entry's current text (read via gtk_editable_get_text)."
   [widget props]
   (doseq [[event handler] props]
-    (when-let [signal (signals event)]
-      (let [value-fn (signal-value signal)
+    (when-let [signal (@signals event)]
+      (let [value-fn (@signal-value signal)
             cb (ffi/foreign-callable
                  (fn [src-widget _data]
                    ;; skip emissions we triggered ourselves via a programmatic
@@ -345,13 +371,16 @@
     ((:apply s) widget props)
     (apply-widget-props! widget props)
     (connect-signals! widget props)
+    ;; widgets whose signals don't fit the uniform void(widget,data) shape wire
+    ;; them here (e.g. :gl-area's realize/render/resize). Runs once at mount.
+    (when-let [connect (:connect s)] (connect widget props))
     widget))
 
 (defn apply-props!
   "Re-apply the prop map to an existing widget (re-render path). Skips :on-* keys
   (signals stay wired from mount) and keys whose value is nil."
   [tag widget props]
-  (let [applied (into {} (filter (fn [[k v]] (and (not (signals k)) (some? v)))
+  (let [applied (into {} (filter (fn [[k v]] (and (not (@signals k)) (some? v)))
                                  (with-orientation tag props)))]
     ((:apply (spec-for tag)) widget applied)
     (apply-widget-props! widget applied)))
