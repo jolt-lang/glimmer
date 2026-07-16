@@ -121,3 +121,49 @@
     (is (= :label (:tag parsed)))
     (is (= "hi" (:label (:props parsed))))
     (is (not (contains? (:props parsed) :key)))))
+
+;; --- reactive re-render marshalling (live REPL development) -----------------
+;; While a GTK app runs the main thread is g_application_run, so a ratom change
+;; triggered off the main thread (e.g. an nREPL eval on its worker thread) must
+;; not reconcile inline — the widget calls would land off the main thread. The
+;; watcher defers the re-render onto the main loop in that case; headless
+;; (loop not running) it renders synchronously as before.
+
+(deftest rerender-watcher-sync-when-loop-not-running
+  (let [rendered (atom 0)
+        scheduled (atom [])
+        running (atom false)
+        w (ui/make-rerender-watcher #(swap! rendered inc) running
+                                    #(swap! scheduled conj %))]
+    (w nil) (w nil) (w nil)
+    (is (= 3 @rendered))       ; every change rendered inline
+    (is (empty? @scheduled)))) ; nothing deferred to the main loop
+
+(deftest rerender-watcher-defers-and-coalesces-when-loop-running
+  (let [rendered (atom 0)
+        scheduled (atom [])
+        running (atom true)
+        w (ui/make-rerender-watcher #(swap! rendered inc) running
+                                    #(swap! scheduled conj %))]
+    ;; a burst of changes coalesces into exactly one deferred re-render
+    (w nil) (w nil) (w nil)
+    (is (= 0 @rendered))
+    (is (= 1 (count @scheduled)))
+    ;; running the deferred work renders once and re-arms coalescing
+    ((first @scheduled))
+    (is (= 1 @rendered))
+    (w nil)
+    (is (= 2 (count @scheduled)))
+    ((second @scheduled))
+    (is (= 2 @rendered))
+    ;; two more changes coalesce into a single new deferred render
+    (w nil) (w nil)
+    (is (= 3 (count @scheduled)))
+    ((last @scheduled))
+    (is (= 3 @rendered))))
+
+(deftest on-gui-runs-inline-when-loop-not-running
+  ;; headless: no GTK main loop, so on-gui just runs the work inline
+  (let [ran (atom 0)]
+    (ui/on-gui #(swap! ran inc))
+    (is (= 1 @ran))))

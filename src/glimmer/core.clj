@@ -28,6 +28,62 @@
             [glimmer.widget :as w]
             [jolt.ffi :as ffi]))
 
+;; --- reactive re-render marshalling (live REPL development) ------------------
+;; While a GTK app runs, g_application_run owns the main thread. notify! runs a
+;; changed cell's watchers synchronously on the caller's thread, so a ratom
+;; mutation made off the main thread (an nREPL eval on its worker thread, or any
+;; future) would otherwise reconcile — calling GTK — off the main thread, which
+;; AppKit rejects on macOS. While the loop runs we defer each component's
+;; re-render onto the loop via a one-shot g_idle_add source (idle callbacks run
+;; on the main thread). Headless, with no loop running, re-renders stay
+;; synchronous exactly as before.
+(defonce ^:private gui-loop-running? (atom false))
+
+(defn- post-to-gui
+  "Schedule zero-arg `work` on the GTK main loop via a one-shot g_idle_add
+  source. The source returns FALSE (0) so it fires once and is removed; the
+  retained callable is released after running so a long REPL session doesn't
+  accumulate them."
+  [work]
+  (let [slot (atom nil)]
+    (reset! slot (ffi/foreign-callable (fn [_data]
+                                         (let [cb @slot]
+                                           (try (work)
+                                                (finally (w/release-callable! cb))))
+                                         0)
+                                       [:pointer] :int :collect-safe))
+    (w/retain-callable! @slot)
+    (g/g-idle-add @slot ffi/null)
+    nil))
+
+(defn on-gui
+  "Run zero-arg `work` on the GTK main thread — asynchronously, on the next main
+  loop iteration — while a GUI app is running. Use it from the nREPL REPL (or any
+  off-main-thread code) to safely touch widgets directly (e.g. re-mount a root
+  after redefining its component) since GTK/AppKit reject off-main-thread widget
+  mutation. Reactive updates don't need this: a plain swap!/reset! on a ratom the
+  UI derefs already re-renders on the main thread. Runs `work` inline when no GUI
+  loop is running (so it is usable headless and in tests)."
+  [work]
+  (if (not @gui-loop-running?) (work) (post-to-gui work)))
+
+(defn make-rerender-watcher
+  "Return the per-component reactive watcher that re-runs `render` when a cell it
+  derefs changes. When `running?` (an atom) is truthy the change is posted onto
+  the GUI main loop via `schedule` (work->any) instead of rendered inline, and a
+  pending flag coalesces a burst of changes into a single deferred render.
+  `running?`/`schedule` default to the live app so a running app marshals while
+  headless tests render inline; they are exposed as args so the decision is
+  unit-testable without GTK."
+  ([render] (make-rerender-watcher render gui-loop-running? post-to-gui))
+  ([render running? schedule]
+   (let [pending (atom false)]
+     (fn [_]
+       (if (not @running?)
+         (render)
+         (when (compare-and-set! pending false true)
+           (schedule (fn [] (reset! pending false) (render)))))))))
+
 ;; --- hiccup parsing ----------------------------------------------------------
 (defn- parse-native [v]
   (let [tag (first v) body (next v)
@@ -279,13 +335,18 @@
     ;; truthiness: a native leaf carries :children [], which is truthy but empty —
     ;; (first []) is nil, and reconcile-el! would deref it (the clear-all crash).
     (swap! inst-atom (fn [c] (if (seq (:children c)) c (assoc c :children [(atom nil)]))))
+    ;; stash the current invocation so the watcher always uses fresh args.
+    ;; Without this a Form-1 child that subscribes to its own reactives
+    ;; re-renders with the initial v from mount, overwriting parent updates.
+    (swap! inst-atom assoc :v v)
     (let [child-atom (first (:children @inst-atom))
           ;; subscribe: any reactive read during render re-runs just this component.
           ;; The watcher is cached on the instance so it's the SAME fn every render;
           ;; a fresh closure would grow each cell's watch set on every re-render.
-          watcher (or (:watcher @inst-atom)
-                      (let [w (fn [_] (reconcile-comp! parent-widget parent-tag v inst-atom))]
-                        (swap! inst-atom assoc :watcher w) w))
+watcher (or (:watcher @inst-atom)
+            (let [w (make-rerender-watcher
+                      #(reconcile-comp! parent-widget parent-tag (:v @inst-atom) inst-atom))]
+              (swap! inst-atom assoc :watcher w) w))
           hiccup (binding [r/*current-watcher* watcher]
                    (if cached-render-fn
                      (cached-render-fn)                       ; Form-2: cached render fn
@@ -326,22 +387,11 @@
   (destroy-inst! root-inst-atom container-widget container-tag)
   (reset! root-inst-atom nil))
 
-(defn run
-  "Run a GTK4 application. On :activate, a window is created and `root-fn` (a
-  thunk returning hiccup) is mounted into it as a reactive component. Blocks
-  until the app quits.
-
-  Options:
-    :app-id        GApplication id      (default \"glimmer.app\")
-    :title         window title         (default \"glimmer\")
-    :width         window width in px   (default 400)
-    :height        window height in px  (default 300)
-    :auto-quit-ms  if set, quit the loop after this many milliseconds
-                   (smoke/automated tests)."
-  [root-fn & {:keys [app-id title width height auto-quit-ms]
-              :or {app-id "glimmer.app" title "glimmer" width 400 height 300}
-              :as opts}]
-  (let [app (g/gtk-application-new app-id g/APPLICATION-DEFAULT-FLAGS)
+(defn ^:private run*
+  [root-fn opts]
+  (let [{:keys [app-id title width height auto-quit-ms]
+         :or {app-id "glimmer.app" title "glimmer" width 400 height 300}} opts
+        app (g/gtk-application-new app-id g/APPLICATION-DEFAULT-FLAGS)
         activate (fn [_app _data]
                    (let [win (g/gtk-application-window-new app)]
                      (g/gtk-window-set-title win title)
@@ -358,4 +408,30 @@
         activate-cb (ffi/foreign-callable activate [:pointer :pointer] :void :collect-safe)]
     (w/retain-callable! activate-cb)
     (g/g-signal-connect-data app "activate" activate-cb ffi/null ffi/null g/CONNECT-DEFAULT)
-    (g/g-application-run app 0 ffi/null)))
+    (try
+      (reset! gui-loop-running? true)
+      (g/g-application-run app 0 ffi/null)
+      (finally (reset! gui-loop-running? false)))))
+
+(defn run
+  "Run a GTK4 application. On :activate, a window is created and `root-fn` (a
+  thunk returning hiccup) is mounted into it as a reactive component. Blocks
+  until the app quits.
+
+  Options:
+    :app-id        GApplication id      (default \"glimmer.app\")
+    :title         window title         (default \"glimmer\")
+    :width         window width in px   (default 400)
+    :height        window height in px  (default 300)
+    :auto-quit-ms  if set, quit the loop after this many milliseconds
+                   (smoke/automated tests).
+
+  On macOS, g_application_run must run on the process main thread or AppKit
+  aborts when it sets the main menu. When driven from `joltc --nrepl-server` the
+  main thread runs jolt.host/run-main-pump and this call hops onto it; under
+  `joltc run` (or any non-jolt host) it runs inline."
+  [root-fn & {:as opts}]
+  (let [start (fn [] (run* root-fn opts))]
+    (if-let [call-on-main-thread (resolve 'jolt.host/call-on-main-thread)]
+      (call-on-main-thread start)
+      (start))))

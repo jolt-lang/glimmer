@@ -269,6 +269,13 @@
   so it isn't collected while C (GTK) still holds only the raw pointer."
   [cb] (swap! callables conj cb) cb)
 
+(defn release-callable!
+  "Drop a reference previously held by `retain-callable!`, allowing collection
+  once C no longer holds the pointer. Pair with one-shot foreign-callables (e.g.
+  a g_idle_add source that returns FALSE) so a long-lived REPL session doesn't
+  accumulate one retained closure per re-render."
+  [cb] (swap! callables disj cb) cb)
+
 ;; Widgets whose signal we are currently firing ourselves (via a programmatic
 ;; setter — gtk_editable_set_text, gtk_check_button_set_active). connect-signals
 ;; gates handlers on this set, so a programmatic prop change can't feed back into

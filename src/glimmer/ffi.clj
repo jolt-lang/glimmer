@@ -45,6 +45,12 @@
 ;; g_timeout_add(interval_ms, GSourceFunc, data) — schedules a callback on the
 ;; main loop. Used by examples/tests to auto-quit the blocking app loop.
 (ffi/defcfn g-timeout-add "g_timeout_add" [:uint :pointer :pointer] :uint)
+;; g_idle_add(GSourceFunc, data) — schedules a one-shot callback on the main
+;; loop, i.e. the main thread while a GTK app is running. Used to marshal
+;; reactive re-renders triggered off the main thread (an nREPL eval mutating a
+;; ratom on its worker thread) back onto it. The callback returns 0 (FALSE) so
+;; the source runs once and is removed.
+(ffi/defcfn g-idle-add "g_idle_add" [:pointer :pointer] :uint)
 
 ;; --- windows (libgtk-4) ------------------------------------------------------
 (ffi/defcfn gtk-application-window-new "gtk_application_window_new" [:pointer] :pointer)
