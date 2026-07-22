@@ -427,11 +427,16 @@ watcher (or (:watcher @inst-atom)
                    (smoke/automated tests).
 
   On macOS, g_application_run must run on the process main thread or AppKit
-  aborts when it sets the main menu. When driven from `joltc --nrepl-server` the
-  main thread runs jolt.host/run-main-pump and this call hops onto it; under
-  `joltc run` (or any non-jolt host) it runs inline."
+  aborts when it sets the main menu. Under `joltc nrepl-server` the primordial
+  thread parks in jolt.host/park-until-interrupt (a main-thread pump); this call
+  hops the boot onto it ASYNCHRONOUSLY via jolt.host/call-on-main-thread-async and
+  returns right away, so the nREPL eval that started the app completes and the
+  session stays live for reactive edits (swap! a ratom, or redefine a component
+  and re-mount it with glimmer.core/on-gui — both marshal onto the main loop). The
+  GUI itself then runs on that main thread. Under `joltc run` (or any non-jolt
+  host) there is no pump, so it runs inline and blocks until the app quits."
   [root-fn & {:as opts}]
   (let [start (fn [] (run* root-fn opts))]
-    (if-let [call-on-main-thread (resolve 'jolt.host/call-on-main-thread)]
-      (call-on-main-thread start)
+    (if-let [hop (resolve 'jolt.host/call-on-main-thread-async)]
+      (hop start)
       (start))))
