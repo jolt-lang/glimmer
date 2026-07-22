@@ -39,6 +39,11 @@
 ;; synchronous exactly as before.
 (defonce ^:private gui-loop-running? (atom false))
 
+;; The running app's mounted root, recorded by run* so reload! can re-render it in
+;; the same window (REPL hot-reload). {:window w :tag :window :inst root-atom
+;; :root-fn f}, or nil when no app is running.
+(defonce ^:private live-root (atom nil))
+
 (defn- post-to-gui
   "Schedule zero-arg `work` on the GTK main loop via a one-shot g_idle_add
   source. The source returns FALSE (0) so it fires once and is removed; the
@@ -396,8 +401,11 @@ watcher (or (:watcher @inst-atom)
                    (let [win (g/gtk-application-window-new app)]
                      (g/gtk-window-set-title win title)
                      (g/gtk-window-set-default-size win width height)
-                     ;; mount as a component so the whole tree is reactive
-                     (mount win :window [root-fn])
+                     ;; mount as a component so the whole tree is reactive, and
+                     ;; record the live root so reload! can re-render it here.
+                     (reset! live-root {:window win :tag :window
+                                        :inst (mount win :window [root-fn])
+                                        :root-fn root-fn})
                      (g/gtk-window-present win)
                      (when auto-quit-ms
                        (let [quit (ffi/foreign-callable
@@ -431,12 +439,39 @@ watcher (or (:watcher @inst-atom)
   thread parks in jolt.host/park-until-interrupt (a main-thread pump); this call
   hops the boot onto it ASYNCHRONOUSLY via jolt.host/call-on-main-thread-async and
   returns right away, so the nREPL eval that started the app completes and the
-  session stays live for reactive edits (swap! a ratom, or redefine a component
-  and re-mount it with glimmer.core/on-gui — both marshal onto the main loop). The
-  GUI itself then runs on that main thread. Under `joltc run` (or any non-jolt
-  host) there is no pump, so it runs inline and blocks until the app quits."
+  session stays live for reactive edits (swap! a ratom to re-render, or redefine
+  components and call glimmer.core/reload! to re-render the running window in
+  place — both marshal onto the main loop). The GUI itself then runs on that main
+  thread. Under `joltc run` (or any non-jolt host) there is no pump, so it runs
+  inline and blocks until the app quits."
   [root-fn & {:as opts}]
   (let [start (fn [] (run* root-fn opts))]
     (if-let [hop (resolve 'jolt.host/call-on-main-thread-async)]
       (hop start)
       (start))))
+
+(defn reload!
+  "Re-mount the running app's root into its existing window, on the GTK main
+  thread. Call this from the nREPL REPL after redefining components to see the
+  changes in the SAME window, instead of opening a new one with run.
+
+  With no argument it re-mounts the current root component. That re-runs the root
+  and re-resolves the child components it references, so redefinitions of those
+  children take effect. To swap the root component itself (e.g. after redefining
+  it), pass the new fn: (glimmer.core/reload! my-app).
+
+  Re-mounting rebuilds the component tree, so a Form-2 root's local state is reset.
+  Keep state that should survive a reload in a top-level defonce ratom that the
+  root reads, rather than in the root's own let. (Repeated reloads also leave the
+  previous tree's watchers and retained callbacks behind; fine for a dev loop, but
+  it is not a full teardown.) No-op when no app is running."
+  ([] (reload! nil))
+  ([new-root-fn]
+   (on-gui
+     (fn []
+       (if-let [{:keys [window tag inst] :as st} @live-root]
+         (let [f (or new-root-fn (:root-fn st))]
+           (unmount! inst window tag)
+           (reset! live-root (assoc st :inst (mount window tag [f]) :root-fn f)))
+         (println "glimmer.core/reload!: no running app to reload"))))
+   nil))
