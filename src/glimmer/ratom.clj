@@ -54,6 +54,16 @@
   (doseq [w (host-deref (:watches r))]
     (w r)))
 
+(defn unwatch!
+  "Remove watcher `w` from reactive cell `r`'s watch set. Used to tear down a
+  component's subscriptions when it is unmounted, so a re-mount against a
+  long-lived (defonce) cell doesn't leave the old tree's watchers behind. A
+  watcher receives the cell it fired on, so it can also unsubscribe itself."
+  [r w]
+  (when (and (map? r) (:watches r))
+    (host-swap! (:watches r) clojure.core/disj w))
+  nil)
+
 (defn- cell [state] {:glimmer/kind :ratom :state state :watches (clojure.core/atom #{})})
 
 (defn atom

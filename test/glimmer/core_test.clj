@@ -167,3 +167,27 @@
   (let [ran (atom 0)]
     (ui/on-gui #(swap! ran inc))
     (is (= 1 @ran))))
+
+;; When a component is unmounted its watcher is marked disposed (dispose-tree!
+;; does this across the removed subtree). A disposed watcher must never render
+;; again — its widgets are gone — and must prune itself from the cell that fired
+;; it, so re-mounting against a long-lived (defonce) cell doesn't leave the old
+;; tree behind. A plain map with a :watches atom stands in for a reactive cell.
+(deftest rerender-watcher-disposed-stops-and-unsubscribes
+  (let [rendered (atom 0)
+        disposed (atom false)
+        watches  (atom nil)
+        cell     {:watches watches}
+        w (ui/make-rerender-watcher #(swap! rendered inc)
+                                    (atom false)      ; running? -> inline render
+                                    (fn [f] (f))      ; schedule (unused inline)
+                                    disposed)]
+    (reset! watches #{w})               ; subscribe, like track! during a render
+    (w cell)                            ; live: a change renders
+    (is (= 1 @rendered))
+    (is (contains? @watches w))
+    (reset! disposed true)              ; unmount marks it disposed
+    (w cell)                            ; a later change must not render...
+    (is (= 1 @rendered) "disposed watcher does not render")
+    (is (not (contains? @watches w))    ; ...and it unsubscribes itself
+        "disposed watcher prunes itself from the cell")))
