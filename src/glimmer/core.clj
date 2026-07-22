@@ -79,15 +79,27 @@
   pending flag coalesces a burst of changes into a single deferred render.
   `running?`/`schedule` default to the live app so a running app marshals while
   headless tests render inline; they are exposed as args so the decision is
-  unit-testable without GTK."
-  ([render] (make-rerender-watcher render gui-loop-running? post-to-gui))
-  ([render running? schedule]
-   (let [pending (atom false)]
-     (fn [_]
-       (if (not @running?)
-         (render)
-         (when (compare-and-set! pending false true)
-           (schedule (fn [] (reset! pending false) (render)))))))))
+  unit-testable without GTK.
+
+  `disposed` (an atom) is set true when the component is unmounted. Once disposed
+  the watcher never renders again (its widgets are gone) and, on the next change,
+  removes itself from the notifying cell — so re-mounting against a long-lived
+  (defonce) cell doesn't leave the old tree rendering into destroyed widgets or
+  pile up dead watchers."
+  ([render] (make-rerender-watcher render gui-loop-running? post-to-gui (atom false)))
+  ([render running? schedule] (make-rerender-watcher render running? schedule (atom false)))
+  ([render running? schedule disposed]
+   (let [pending (atom false)
+         self (atom nil)]
+     (reset! self
+             (fn [cell]
+               (if @disposed
+                 (r/unwatch! cell @self)
+                 (if (not @running?)
+                   (render)
+                   (when (compare-and-set! pending false true)
+                     (schedule (fn [] (reset! pending false) (render))))))))
+     @self)))
 
 ;; --- hiccup parsing ----------------------------------------------------------
 (defn- parse-native [v]
@@ -212,6 +224,20 @@
         (doseq [child (:children inst)]
           (destroy-inst! child parent-widget parent-tag))))))
 
+(defn- dispose-tree!
+  "Mark every component watcher in the instance subtree disposed, so it stops
+  rendering and prunes itself from its reactive cells on the next change. Pure
+  bookkeeping (no GTK calls), so unlike destroy-inst! it recurses the whole tree
+  regardless of which instances own widgets. Called wherever a subtree is removed
+  (unmount, surplus/removed children) so subscriptions don't outlive the widgets —
+  which matters most when re-mounting against a long-lived (defonce) cell."
+  [inst-atom]
+  (when inst-atom
+    (let [inst @inst-atom]
+      (when-let [d (:disposed inst)] (reset! d true))
+      (doseq [child (:children inst)]
+        (dispose-tree! child)))))
+
 (defn- reconcile-positional-children!
   "Positionally reconcile `new-children` (a flattened vector of hiccup) against the
   instance's existing children, reusing widgets where the element shape matches at
@@ -224,6 +250,7 @@
                       (if (< i (count old)) (nth old i) (atom nil))))]
     ;; remove widgets for children that no longer exist
     (doseq [i (range n (count old))]
+      (dispose-tree! (nth old i))
       (destroy-inst! (nth old i) parent-widget parent-tag))
     ;; reconcile each child into its (possibly new) atom
     (doseq [i (range n)]
@@ -270,6 +297,7 @@
         ;; reuse lookups are by key; nil-keyed old children are never reused
         old-by-key (into {} (keep (fn [a] (when-let [k (:key @a)] [k a])) old))]
     (doseq [i destroy]
+      (dispose-tree! (nth old i))
       (destroy-inst! (nth old i) parent-widget parent-tag))
     (let [child-atoms (vec (for [slot slots]
                              (if (= :reuse (:kind slot))
@@ -349,9 +377,13 @@
           ;; The watcher is cached on the instance so it's the SAME fn every render;
           ;; a fresh closure would grow each cell's watch set on every re-render.
 watcher (or (:watcher @inst-atom)
-            (let [w (make-rerender-watcher
-                      #(reconcile-comp! parent-widget parent-tag (:v @inst-atom) inst-atom))]
-              (swap! inst-atom assoc :watcher w) w))
+            ;; disposed is flipped by dispose-tree! on unmount; the watcher stops
+            ;; rendering and prunes itself from its cells once set.
+            (let [disposed (atom false)
+                  w (make-rerender-watcher
+                      #(reconcile-comp! parent-widget parent-tag (:v @inst-atom) inst-atom)
+                      gui-loop-running? post-to-gui disposed)]
+              (swap! inst-atom assoc :watcher w :disposed disposed) w))
           hiccup (binding [r/*current-watcher* watcher]
                    (if cached-render-fn
                      (cached-render-fn)                       ; Form-2: cached render fn
@@ -387,8 +419,10 @@ watcher (or (:watcher @inst-atom)
     root))
 
 (defn unmount!
-  "Remove a mounted root (the atom returned by mount) from its container."
+  "Remove a mounted root (the atom returned by mount) from its container, tearing
+  down its reactive subscriptions first so nothing renders into the removed tree."
   [root-inst-atom container-widget container-tag]
+  (dispose-tree! root-inst-atom)
   (destroy-inst! root-inst-atom container-widget container-tag)
   (reset! root-inst-atom nil))
 
@@ -460,11 +494,13 @@ watcher (or (:watcher @inst-atom)
   children take effect. To swap the root component itself (e.g. after redefining
   it), pass the new fn: (glimmer.core/reload! my-app).
 
-  Re-mounting rebuilds the component tree, so a Form-2 root's local state is reset.
-  Keep state that should survive a reload in a top-level defonce ratom that the
-  root reads, rather than in the root's own let. (Repeated reloads also leave the
-  previous tree's watchers and retained callbacks behind; fine for a dev loop, but
-  it is not a full teardown.) No-op when no app is running."
+  Re-mounting rebuilds the component tree, so state held in a component's own let
+  is reset. Keep state that should survive a reload in a top-level defonce reactive
+  cell (atom/cursor/reaction) that the components read — reagent-style. Unmounting
+  tears down the old tree's watchers, so those defonce cells keep exactly the live
+  tree's subscriptions across reloads. (Signal-handler callbacks from the old tree
+  are still retained; fine for a dev loop, not a full teardown.) No-op when no app
+  is running."
   ([] (reload! nil))
   ([new-root-fn]
    (on-gui
