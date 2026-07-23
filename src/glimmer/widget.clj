@@ -364,7 +364,9 @@
   (when-let [a (:halign props)] (g/gtk-widget-set-halign widget (->enum "GtkAlign" a)))
   (when-let [a (:valign props)] (g/gtk-widget-set-valign widget (->enum "GtkAlign" a)))
   (when (contains? props :hexpand) (g/gtk-widget-set-hexpand widget (->bool (:hexpand props))))
-  (when (contains? props :vexpand) (g/gtk-widget-set-vexpand widget (->bool (:vexpand props)))))
+  (when (contains? props :vexpand) (g/gtk-widget-set-vexpand widget (->bool (:vexpand props))))
+  (when-let [w (:width-request props)]  (g/gtk-widget-set-size-request widget (int w) -1))
+  (when-let [h (:height-request props)] (g/gtk-widget-set-size-request widget -1 (int h))))
 
 ;; --- public create / patch ---------------------------------------------------
 (defn create!

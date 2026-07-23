@@ -125,6 +125,7 @@
 (ffi/defcfn gtk-widget-set-valign "gtk_widget_set_valign" [:pointer :int] :void)
 (ffi/defcfn gtk-widget-set-hexpand "gtk_widget_set_hexpand" [:pointer :int] :void)
 (ffi/defcfn gtk-widget-set-vexpand "gtk_widget_set_vexpand" [:pointer :int] :void)
+(ffi/defcfn gtk-widget-set-size-request "gtk_widget_set_size_request" [:pointer :int :int] :void)
 
 ;; --- frame (single-child container with an optional label) -------------------
 (ffi/defcfn gtk-frame-new       "gtk_frame_new"       [:string] :pointer)
