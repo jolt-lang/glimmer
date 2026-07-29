@@ -5,16 +5,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install joltc
+      - name: Install jolt
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y liblz4-1 zlib1g libtinfo6 libgtk-4-1
-          url=$(curl -fsSL https://api.github.com/repos/jolt-lang/jolt/releases/latest \
-                | jq -r '.assets[] | select(.name | test("x86_64-linux\\.tar\\.gz$")) | .browser_download_url')
-          mkdir -p "$HOME/.jolt"
-          curl -fsSL "$url" | tar xz -C "$HOME/.jolt" --strip-components=1
-          chmod +x "$HOME/.jolt/joltc"
+          # Install through jolt's own install script rather than resolving the
+          # release asset here: it owns the archive and binary naming (which
+          # changed in v0.5.0, when the CLI was renamed from joltc to jolt) and
+          # verifies the checksum. Resolving the asset by hand left this workflow
+          # chmod'ing a $HOME/.jolt/joltc that no release ships any more.
+          curl -fsSL https://raw.githubusercontent.com/jolt-lang/jolt/main/install \
+            | bash -s -- --dir "$HOME/.jolt"
           echo "$HOME/.jolt" >> "$GITHUB_PATH"
       - name: Test
-        run: JOLT_PWD="$PWD" joltc -M:test
+        run: JOLT_PWD="$PWD" jolt -M:test
