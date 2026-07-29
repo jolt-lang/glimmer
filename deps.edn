@@ -41,7 +41,7 @@
  ;; A reactive GUI toolkit over GTK4 for jolt. See README.md.
  ;;
  ;; Each runnable has its own alias with :main-opts (jolt's -M:alias form needs
- ;; main-opts). Tasks are thin wrappers so you can run `joltc counter`, etc.
+ ;; main-opts). Tasks are thin wrappers so you can run `jolt counter`, etc.
  :aliases {:test    {:extra-paths ["test"]     :main-opts ["-m" "glimmer.test-runner"]}
            :counter {:extra-paths ["examples"] :main-opts ["-m" "glimmer.counter"]}
            :todo    {:extra-paths ["examples"] :main-opts ["-m" "glimmer.todo"]}
@@ -50,10 +50,10 @@
            :repl-live-smoke {:extra-paths ["examples"] :main-opts ["-m" "glimmer.repl-live-smoke"]}
            :keyed   {:extra-paths ["examples"] :main-opts ["-m" "glimmer.keyed"]}}
 
-  :tasks {test    "joltc -M:test"
-          counter "joltc -M:counter"
-          todo    "joltc -M:todo"
-          smoke   "joltc -M:smoke"
-          main-thread-smoke "joltc -M:main-thread-smoke"
-          repl-live-smoke "joltc -M:repl-live-smoke"
-          keyed   "joltc -M:keyed"}}
+  :tasks {test    "jolt -M:test"
+          counter "jolt -M:counter"
+          todo    "jolt -M:todo"
+          smoke   "jolt -M:smoke"
+          main-thread-smoke "jolt -M:main-thread-smoke"
+          repl-live-smoke "jolt -M:repl-live-smoke"
+          keyed   "jolt -M:keyed"}}
