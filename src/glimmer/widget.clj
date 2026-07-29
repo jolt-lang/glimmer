@@ -149,6 +149,12 @@
 
 ;; --- widget specs ------------------------------------------------------------
 ;; Each spec: {:ctor (fn [props] widget-ptr) :apply (fn [widget props]) :container (#{:box :window :none})}
+;; The two suppressing setters live further down, beside the `suppressing` atom
+;; they read; the :apply closures below call them, so declare them here. A
+;; reference to a name that isn't interned yet is a compile error, in a nested
+;; closure as much as at the top level.
+(declare set-entry-text! set-checkbutton-active!)
+
 (defn- window-spec []
   {:ctor    (fn [_] (g/gtk-window-new))
    :apply   (fn [w p]
