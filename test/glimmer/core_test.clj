@@ -191,3 +191,39 @@
     (is (= 1 @rendered) "disposed watcher does not render")
     (is (not (contains? @watches w))    ; ...and it unsubscribes itself
         "disposed watcher prunes itself from the cell")))
+
+;; A component's re-render watcher used to run
+;;   (reconcile-comp! pw pt (:v @inst-atom) inst-atom)
+;; unconditionally. When the watcher outlives its instance's contents — the
+;; native->comp reset skeleton, an unmounted tree, a not-yet-rendered slot —
+;; (:v @inst-atom) is nil, reconcile-comp! treats nil as the invocation [nil],
+;; and invoking (first nil) crashes with "nil cannot be cast to IFn". That is
+;; exactly what fired when the image-dump example's load button restored a world
+;; image and the after-restore hook reload!ed the tree while a status-cell
+;; notification was still pending against the old tree's watcher.
+(deftest rerender-thunk-guards-missing-invocation
+  (testing "no-ops when the instance atom holds nil"
+    (let [calls (atom [])
+          t (ui/rerender-thunk (fn [& args] (swap! calls conj args)) :pw :pt (atom nil))]
+      (t)
+      (is (= [] @calls))))
+  (testing "no-ops on a reset skeleton (no :v)"
+    (let [calls (atom [])
+          t (ui/rerender-thunk (fn [& args] (swap! calls conj args)) :pw :pt
+                               (atom {:children [(atom nil)]}))]
+      (t)
+      (is (= [] @calls))))
+  (testing "re-renders the stored invocation when present"
+    (let [calls (atom [])
+          inst (atom {:v [:label {:label "x"}]})
+          t (ui/rerender-thunk (fn [& args] (swap! calls conj args)) :pw :pt inst)]
+      (t)
+      (is (= [[:pw :pt [:label {:label "x"}] inst]] @calls))))
+  (testing "reads :v at fire time, not construction time"
+    (let [calls (atom [])
+          inst (atom nil)
+          t (ui/rerender-thunk (fn [& args] (swap! calls conj args)) :pw :pt inst)]
+      (t)
+      (reset! inst {:v [:x]})
+      (t)
+      (is (= 1 (count @calls))))))

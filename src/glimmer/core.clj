@@ -334,9 +334,27 @@
             new {:type :native :tag tag :props props :widget widget :children []}]
         (if (and inst (= (:type inst) :native))
           (w/replace-child! parent-tag parent-widget (:widget inst) widget)
-          (w/append-child! parent-tag parent-widget widget))
+          (do
+            ;; comp -> native: the component owned no widget, but its expanded
+            ;; children are parented here and its watchers are live. Tear both
+            ;; down or the old subtree keeps rendering beside the new widget.
+            (when inst
+              (dispose-tree! inst-atom)
+              (destroy-inst! inst-atom parent-widget parent-tag))
+            (w/append-child! parent-tag parent-widget widget)))
         (reset! inst-atom new)))
     (reconcile-children! (:widget @inst-atom) tag children inst-atom)))
+
+(defn rerender-thunk
+  "The zero-arg closure a component's watcher runs to re-render it: re-reconciles
+  the instance's last stored invocation (:v). No-ops when the instance no longer
+  holds one — a fresh slot, a reset skeleton, or an unmounted tree. A stale
+  watcher firing after its instance was reset used to re-render (:v nil) = nil,
+  which reconcile-comp! read as a component invocation [nil] and crashed invoking
+  nil. `reconcile` is passed in so the guard is testable without GTK."
+  [reconcile parent-widget parent-tag inst-atom]
+  (fn [] (when-let [v (:v @inst-atom)]
+           (reconcile parent-widget parent-tag v inst-atom))))
 
 (defn- reconcile-comp!
   "Expand a component invocation into native hiccup and reconcile its single child.
@@ -363,6 +381,10 @@
     ;; and deref a nil :widget.
     (when (and (:widget cur) (not= :comp (:type cur)))
       (w/remove-child! parent-tag parent-widget (:widget cur))
+      ;; dispose before resetting: the reset replaces the map that holds the
+      ;; subtree's :disposed atoms, so a dispose after it can no longer reach
+      ;; them and their watchers would keep firing against the reset instance.
+      (dispose-tree! inst-atom)
       (reset! inst-atom {:children [(atom nil)]}))
     ;; ensure exactly one child slot for the expanded root. Use `seq`, not
     ;; truthiness: a native leaf carries :children [], which is truthy but empty —
@@ -381,7 +403,7 @@ watcher (or (:watcher @inst-atom)
             ;; rendering and prunes itself from its cells once set.
             (let [disposed (atom false)
                   w (make-rerender-watcher
-                      #(reconcile-comp! parent-widget parent-tag (:v @inst-atom) inst-atom)
+                      (rerender-thunk reconcile-comp! parent-widget parent-tag inst-atom)
                       gui-loop-running? post-to-gui disposed)]
               (swap! inst-atom assoc :watcher w :disposed disposed) w))
           hiccup (binding [r/*current-watcher* watcher]
