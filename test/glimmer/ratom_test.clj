@@ -30,6 +30,26 @@
     (swap! a * 3)
     (is (= 6 @a))))
 
+(deftest swap-preserves-nil-args
+  ;; swap! used to inject a nil in its 2-arity and strip nils back out in the
+  ;; varargs arity, which silently dropped LEGITIMATE nil arguments:
+  ;; (swap! a assoc :k nil) became (assoc @a :k) — an odd key/val count. The
+  ;; reconciler storing a nil :key for an unkeyed child hit this on every render.
+  (testing "host atom"
+    (let [a (clojure.core/atom {})]
+      (is (= {:k nil} (swap! a assoc :k nil)))
+      (is (= {:k nil :j 1} (swap! a assoc :j 1)))))
+  (testing "reactive cell"
+    (let [a (atom {})]
+      (swap! a assoc :k nil)
+      (is (= {:k nil} @a))))
+  (testing "a nil in any argument position survives"
+    (let [a (clojure.core/atom [])]
+      (swap! a conj nil)
+      (is (= [nil] @a))
+      (swap! a (fn [v x y] (conj v [x y])) nil :b)
+      (is (= [nil [nil :b]] @a)))))
+
 (deftest watcher-fires-on-change
   (let [a (atom 0)
         fired (clojure.core/atom 0)

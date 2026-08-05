@@ -152,12 +152,21 @@
 (defn swap!
   "Apply f (plus args) to the current value of a reactive cell and reset! it.
   Delegates to the host swap! for non-reactive refs."
-  ([x f] (swap! x f nil))
+  ;; Each arity forwards its own args. An earlier version had the 2-arity call
+  ;; (swap! x f nil) and the varargs arity strip nils back out, which silently
+  ;; dropped LEGITIMATE nil arguments: (swap! a assoc :k nil) became
+  ;; (assoc @a :k) — an odd key/val count. Anything storing a nil through swap!
+  ;; hit it; the reconciler storing a nil :key for an unkeyed child did.
+  ([x f]
+   (cond
+     (or (ratom? x) (cursor? x)) (reset! x (f (raw-value x)))
+     (reaction? x) (throw (ex-info "a reaction is read-only" {:cell x}))
+     :else (host-swap! x f)))
   ([x f & args]
    (cond
-     (or (ratom? x) (cursor? x)) (reset! x (apply f (raw-value x) (remove nil? args)))
+     (or (ratom? x) (cursor? x)) (reset! x (apply f (raw-value x) args))
      (reaction? x) (throw (ex-info "a reaction is read-only" {:cell x}))
-     :else (apply host-swap! x f (remove nil? args)))))
+     :else (apply host-swap! x f args))))
 
 ;; --- rebind clojure.core so @ / reset! / swap! work everywhere ---------------
 ;; The reader emits (clojure.core/deref x) for @, so rebinding the var is the
