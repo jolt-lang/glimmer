@@ -138,6 +138,9 @@
 ;; propagation off at construction so the child scrolls within the allotted area.
 (ffi/defcfn gtk-scrolled-window-new "gtk_scrolled_window_new" [:pointer :pointer] :pointer)
 (ffi/defcfn gtk-scrolled-window-set-child "gtk_scrolled_window_set_child" [:pointer :pointer] :void)
+(ffi/defcfn gtk-scrolled-window-get-vadjustment
+  "gtk_scrolled_window_get_vadjustment" [:pointer] :pointer)
+(ffi/defcfn gtk-adjustment-set-value "gtk_adjustment_set_value" [:pointer :double] :void)
 (ffi/defcfn gtk-scrolled-window-set-propagate-natural-height
   "gtk_scrolled_window_set_propagate_natural_height" [:pointer :int] :void)
 (ffi/defcfn gtk-scrolled-window-set-propagate-natural-width

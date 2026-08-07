@@ -232,7 +232,16 @@
                  (g/gtk-scrolled-window-set-propagate-natural-height sw 0)
                  (g/gtk-scrolled-window-set-propagate-natural-width sw 0)
                  sw))
-   :apply    (fn [_ _])
+   ;; :scroll-top resets the vertical offset. A scrolled window keeps its
+   ;; position across content changes, so a panel whose child is replaced
+   ;; (an inspector showing a different selection) opens part-way down the
+   ;; previous content. Any change to the prop's value scrolls back to the
+   ;; top, so callers pass something that varies with the content.
+   :apply    (fn [w p]
+               (when (contains? p :scroll-top)
+                 (let [adj (g/gtk-scrolled-window-get-vadjustment w)]
+                   (when-not (ffi/null? adj)
+                     (g/gtk-adjustment-set-value adj 0.0)))))
    :container :scrolled})
 
 ;; hiccup tag -> widget spec. An atom so extensions register new widget types
