@@ -9,6 +9,7 @@ reconciler. It has no dependencies and knows nothing about any toolkit. The
 widgets themselves come from a backend:
 
 - [glimmer-gtk](https://github.com/jolt-lang/glimmer-gtk) — GTK4
+- [glimmer-tui](https://github.com/jolt-lang/glimmer-tui) — the terminal, over ncursesw
 
 ```clojure
 (ns myapp
@@ -132,9 +133,10 @@ the rest. The full contract is in the `glimmer.backend` namespace docstring:
 A `widget` is whatever the backend wants — a native pointer, a record, a map. The
 core never inspects one, it only hands it back.
 
-Two implementations exist to work from: `glimmer-gtk.core` (real, over GTK4) and
-`glimmer.mock-backend` in this project's tests (an in-memory tree, which is how
-the reconciler is tested without a display).
+Three implementations exist to work from: `glimmer-gtk.core` (over GTK4),
+`glimmer-tui.core` (over ncursesw, which also has to supply focus and an input
+loop), and `glimmer.mock-backend` in this project's tests (an in-memory tree,
+which is how the reconciler is tested without a display).
 
 Threading: a toolkit that rejects widget mutation off its main thread sets
 `glimmer.backend/loop-running?` while its loop runs and supplies `:schedule`. The
