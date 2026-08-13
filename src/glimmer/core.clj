@@ -20,73 +20,54 @@
   binds glimmer.ratom/*current-watcher* around its render so any reactive cell it
   derefs re-runs that component (and only that component) on change.
 
-  The app loop is a GtkApplication whose :activate handler mounts the root
-  component into a fresh window; g_application_run blocks running the GTK main
-  loop, and every signal/activate callback is a :collect-safe foreign-callable."
-  (:require [glimmer.ffi :as g]
-            [glimmer.ratom :as r]
-            [glimmer.widget :as w]
-            [jolt.ffi :as ffi]))
+  This namespace is toolkit-independent. Everything native — what a widget is,
+  how props are applied, how children are attached, what the event loop looks
+  like — is reached through glimmer.backend, so the same reconciler drives GTK
+  (glimmer-gtk), and any Qt or TUI backend that implements the same map of
+  functions."
+  (:require [glimmer.backend :as b]
+            [glimmer.ratom :as r]))
 
 ;; --- reactive re-render marshalling (live REPL development) ------------------
-;; While a GTK app runs, g_application_run owns the main thread. notify! runs a
-;; changed cell's watchers synchronously on the caller's thread, so a ratom
+;; While an app runs, the backend's event loop owns the main thread. notify! runs
+;; a changed cell's watchers synchronously on the caller's thread, so a ratom
 ;; mutation made off the main thread (an nREPL eval on its worker thread, or any
-;; future) would otherwise reconcile — calling GTK — off the main thread, which
-;; AppKit rejects on macOS. While the loop runs we defer each component's
-;; re-render onto the loop via a one-shot g_idle_add source (idle callbacks run
-;; on the main thread). Headless, with no loop running, re-renders stay
-;; synchronous exactly as before.
-(defonce ^:private gui-loop-running? (atom false))
+;; future) would otherwise reconcile — calling into the toolkit — off the main
+;; thread, which most toolkits reject (AppKit does, on macOS). While the loop
+;; runs we defer each component's re-render onto it via backend/schedule.
+;; Headless, with no loop running, re-renders stay synchronous exactly as before.
 
-;; The running app's mounted root, recorded by run* so reload! can re-render it in
+;; The running app's mounted root, recorded by run so reload! can re-render it in
 ;; the same window (REPL hot-reload). {:window w :tag :window :inst root-atom
 ;; :root-fn f}, or nil when no app is running.
 (defonce ^:private live-root (atom nil))
 
-(defn- post-to-gui
-  "Schedule zero-arg `work` on the GTK main loop via a one-shot g_idle_add
-  source. The source returns FALSE (0) so it fires once and is removed; the
-  retained callable is released after running so a long REPL session doesn't
-  accumulate them."
-  [work]
-  (let [slot (atom nil)]
-    (reset! slot (ffi/foreign-callable (fn [_data]
-                                         (let [cb @slot]
-                                           (try (work)
-                                                (finally (w/release-callable! cb))))
-                                         0)
-                                       [:pointer] :int :collect-safe))
-    (w/retain-callable! @slot)
-    (g/g-idle-add @slot ffi/null)
-    nil))
-
 (defn on-gui
-  "Run zero-arg `work` on the GTK main thread — asynchronously, on the next main
-  loop iteration — while a GUI app is running. Use it from the nREPL REPL (or any
+  "Run zero-arg `work` on the UI thread — asynchronously, on the next iteration
+  of the event loop — while an app is running. Use it from the nREPL REPL (or any
   off-main-thread code) to safely touch widgets directly (e.g. re-mount a root
-  after redefining its component) since GTK/AppKit reject off-main-thread widget
+  after redefining its component), since toolkits reject off-main-thread widget
   mutation. Reactive updates don't need this: a plain swap!/reset! on a ratom the
-  UI derefs already re-renders on the main thread. Runs `work` inline when no GUI
-  loop is running (so it is usable headless and in tests)."
+  UI derefs already re-renders on the UI thread. Runs `work` inline when no loop
+  is running (so it is usable headless and in tests)."
   [work]
-  (if (not @gui-loop-running?) (work) (post-to-gui work)))
+  (if (not @b/loop-running?) (work) (b/schedule work)))
 
 (defn make-rerender-watcher
   "Return the per-component reactive watcher that re-runs `render` when a cell it
   derefs changes. When `running?` (an atom) is truthy the change is posted onto
-  the GUI main loop via `schedule` (work->any) instead of rendered inline, and a
+  the UI thread via `schedule` (work->any) instead of rendered inline, and a
   pending flag coalesces a burst of changes into a single deferred render.
-  `running?`/`schedule` default to the live app so a running app marshals while
-  headless tests render inline; they are exposed as args so the decision is
-  unit-testable without GTK.
+  `running?`/`schedule` default to the live backend so a running app marshals
+  while headless tests render inline; they are exposed as args so the decision is
+  unit-testable without a toolkit.
 
   `disposed` (an atom) is set true when the component is unmounted. Once disposed
   the watcher never renders again (its widgets are gone) and, on the next change,
   removes itself from the notifying cell — so re-mounting against a long-lived
   (defonce) cell doesn't leave the old tree rendering into destroyed widgets or
   pile up dead watchers."
-  ([render] (make-rerender-watcher render gui-loop-running? post-to-gui (atom false)))
+  ([render] (make-rerender-watcher render b/loop-running? b/schedule (atom false)))
   ([render running? schedule] (make-rerender-watcher render running? schedule (atom false)))
   ([render running? schedule disposed]
    (let [pending (atom false)
@@ -132,7 +113,7 @@
 ;; Keyed reconciliation matches children by a stable :key instead of by position,
 ;; so list items can be added, removed or reordered without a handler capturing a
 ;; stale index. The planning below is pure (operates on keys, not widgets) so it
-;; is unit-testable headlessly; the GTK wiring lives in reconcile-children!.
+;; is unit-testable headlessly; the widget wiring lives in reconcile-children!.
 
 (defn child-key
   "The stable identity of a child element used by keyed reconciliation, or nil
@@ -163,13 +144,13 @@
 
 (defn keyed-plan
   "Pure diff of old vs new child keys -> a reconcile plan the keyed path applies
-  against GTK widgets. `old-keys`/`new-keys` are the keys of the previously-
+  against real widgets. `old-keys`/`new-keys` are the keys of the previously-
   mounted and newly-requested children, in order. Returns a map:
     :destroy  [old-index ...]                                keys gone from new
     :slots    [{:key, :kind :reuse|:create, :old-index?}]    in target order
     :reorder? boolean                                         widget reorder needed
   :reorder? is false when surviving widgets already sit in the right relative
-  order with new ones appended after them (GTK appends to the tail); true
+  order with new ones appended after them (containers append to the tail); true
   otherwise — e.g. survivors were reordered, or a new item must appear before an
   existing one."
   [old-keys new-keys]
@@ -191,14 +172,14 @@
 
 ;; --- instance tree -----------------------------------------------------------
 ;; Each rendered element has an atom holding its instance state:
-;;   native: {:type :native :tag :button :props {} :widget <ptr> :children [atom...]}
+;;   native: {:type :native :tag :button :props {} :widget <w> :children [atom...]}
 ;;   comp:   {:type :comp :render-fn <fn> :children [atom]}  ; one child = expanded root
 ;; A nil instance means nothing has been mounted at that position yet.
 
 (declare reconcile-el!)
 
 (defn- inst-widget
-  "The GTK widget an instance contributes to its parent container: a native
+  "The widget an instance contributes to its parent container: a native
   instance's own :widget, or — for a component, which owns no widget — the widget
   of its single expanded child (recursing, since a component can expand to another
   component). nil if nothing is mounted yet."
@@ -211,26 +192,28 @@
 (defn- destroy-inst!
   "Remove the widget an instance contributes from `parent-widget`. A native
   instance owns its widget: removing it unparents the whole subtree, so we stop —
-  recursing into its children would call gtk_box_remove on a container GTK has
-  already finalized (the source of GTK_IS_BOX criticals). A component owns no
-  widget, so its expanded children are parented in the component's own container;
-  recurse with the same parent to remove them from there."
+  recursing into its children would ask an already-finalized container to remove
+  children it no longer has (the source of GTK_IS_BOX criticals under GTK). A
+  component owns no widget, so its expanded children are parented in the
+  component's own container; recurse with the same parent to remove them from
+  there."
   [inst-atom parent-widget parent-tag]
   (when inst-atom
     (let [inst @inst-atom
           widget (:widget inst)]
       (if widget
-        (w/remove-child! parent-tag parent-widget widget)
+        (b/remove-child! parent-tag parent-widget widget)
         (doseq [child (:children inst)]
           (destroy-inst! child parent-widget parent-tag))))))
 
 (defn- dispose-tree!
   "Mark every component watcher in the instance subtree disposed, so it stops
   rendering and prunes itself from its reactive cells on the next change. Pure
-  bookkeeping (no GTK calls), so unlike destroy-inst! it recurses the whole tree
-  regardless of which instances own widgets. Called wherever a subtree is removed
-  (unmount, surplus/removed children) so subscriptions don't outlive the widgets —
-  which matters most when re-mounting against a long-lived (defonce) cell."
+  bookkeeping (no widget calls), so unlike destroy-inst! it recurses the whole
+  tree regardless of which instances own widgets. Called wherever a subtree is
+  removed (unmount, surplus/removed children) so subscriptions don't outlive the
+  widgets — which matters most when re-mounting against a long-lived (defonce)
+  cell."
   [inst-atom]
   (when inst-atom
     (let [inst @inst-atom]
@@ -258,11 +241,11 @@
     (swap! inst-atom assoc :children reused)))
 
 (defn- reorder-keyed-widgets!
-  "Force `child-atoms`' widgets into the given order within the parent, using
-  gtk_box_reorder_child_after (each widget moved to sit after the previous one;
-  the first goes to position 0). Called only when keyed-plan says a reorder is
-  needed. Repositioning does not recreate widgets, so signal handlers and the
-  instance atoms stay intact. No-op for non-box containers."
+  "Force `child-atoms`' widgets into the given order within the parent, moving
+  each widget to sit after the previous one (the first goes to position 0).
+  Called only when keyed-plan says a reorder is needed. Repositioning does not
+  recreate widgets, so signal handlers and the instance atoms stay intact. A
+  no-op for backends without ordered containers."
   [parent-widget parent-tag child-atoms]
   ;; resolve each child to its contributed widget — a keyed child may be a
   ;; component, whose widget lives one level down on its expanded child.
@@ -272,7 +255,7 @@
       (doseq [i (range n)]
         (let [w (nth widgets i)
               prev (when (pos? i) (nth widgets (dec i)))]
-          (w/reorder-child! parent-tag parent-widget w prev))))))
+          (b/reorder-child! parent-tag parent-widget w prev))))))
 
 (defn- reconcile-keyed-children!
   "Reconcile uniformly-keyed `new-children` (a flattened vector of hiccup, each
@@ -328,12 +311,12 @@
   (let [{:keys [tag props children]} (parse-native v)
         inst @inst-atom]
     (if (and inst (= (:type inst) :native) (= (:tag inst) tag))
-      (do (w/apply-props! tag (:widget inst) props)
+      (do (b/apply-props! tag (:widget inst) props)
           (swap! inst-atom assoc :props props))
-      (let [widget (w/create! tag props)
+      (let [widget (b/create! tag props)
             new {:type :native :tag tag :props props :widget widget :children []}]
         (if (and inst (= (:type inst) :native))
-          (w/replace-child! parent-tag parent-widget (:widget inst) widget)
+          (b/replace-child! parent-tag parent-widget (:widget inst) widget)
           (do
             ;; comp -> native: the component owned no widget, but its expanded
             ;; children are parented here and its watchers are live. Tear both
@@ -341,7 +324,7 @@
             (when inst
               (dispose-tree! inst-atom)
               (destroy-inst! inst-atom parent-widget parent-tag))
-            (w/append-child! parent-tag parent-widget widget)))
+            (b/append-child! parent-tag parent-widget widget)))
         (reset! inst-atom new)))
     (reconcile-children! (:widget @inst-atom) tag children inst-atom)))
 
@@ -351,7 +334,7 @@
   holds one — a fresh slot, a reset skeleton, or an unmounted tree. A stale
   watcher firing after its instance was reset used to re-render (:v nil) = nil,
   which reconcile-comp! read as a component invocation [nil] and crashed invoking
-  nil. `reconcile` is passed in so the guard is testable without GTK."
+  nil. `reconcile` is passed in so the guard is testable without a backend."
   [reconcile parent-widget parent-tag inst-atom]
   (fn [] (when-let [v (:v @inst-atom)]
            (reconcile parent-widget parent-tag v inst-atom))))
@@ -380,7 +363,7 @@
     ;; survive, or a later comp->native transition would mistake the stale :type
     ;; and deref a nil :widget.
     (when (and (:widget cur) (not= :comp (:type cur)))
-      (w/remove-child! parent-tag parent-widget (:widget cur))
+      (b/remove-child! parent-tag parent-widget (:widget cur))
       ;; dispose before resetting: the reset replaces the map that holds the
       ;; subtree's :disposed atoms, so a dispose after it can no longer reach
       ;; them and their watchers would keep firing against the reset instance.
@@ -404,7 +387,7 @@ watcher (or (:watcher @inst-atom)
             (let [disposed (atom false)
                   w (make-rerender-watcher
                       (rerender-thunk reconcile-comp! parent-widget parent-tag inst-atom)
-                      gui-loop-running? post-to-gui disposed)]
+                      b/loop-running? b/schedule disposed)]
               (swap! inst-atom assoc :watcher w :disposed disposed) w))
           hiccup (binding [r/*current-watcher* watcher]
                    (if cached-render-fn
@@ -420,21 +403,21 @@ watcher (or (:watcher @inst-atom)
   [parent-widget parent-tag el inst-atom]
   (cond
     (nil? el) nil
-    (string? el) (reconcile-native! parent-widget parent-tag [:label {:label el}] inst-atom)
-    (number? el) (reconcile-native! parent-widget parent-tag [:label {:label (str el)}] inst-atom)
+    (string? el) (reconcile-native! parent-widget parent-tag (b/text->element el) inst-atom)
+    (number? el) (reconcile-native! parent-widget parent-tag (b/text->element (str el)) inst-atom)
     (vector? el)
     (let [head (first el)]
       (cond
         (keyword? head) (reconcile-native! parent-widget parent-tag el inst-atom)
         (fn? head)      (reconcile-comp! parent-widget parent-tag el inst-atom)
         :else (throw (ex-info (str "unsupported hiccup element: " (pr-str el)) {:el el}))))
-    :else (reconcile-native! parent-widget parent-tag [:label {:label (pr-str el)}] inst-atom)))
+    :else (reconcile-native! parent-widget parent-tag (b/text->element (pr-str el)) inst-atom)))
 
 ;; --- public API --------------------------------------------------------------
 (defn mount
   "Mount `hiccup` (a native element, a component invocation [fn args...], or a
-  primitive) into a GTK container. Returns the root instance atom. Wrap a plain
-  function in a vector ([my-app]) so it reconciles as a reactive component."
+  primitive) into a container widget. Returns the root instance atom. Wrap a
+  plain function in a vector ([my-app]) so it reconciles as a reactive component."
   [container-widget container-tag hiccup]
   (let [root (atom nil)]
     (reconcile-el! container-widget container-tag hiccup root)
@@ -448,68 +431,33 @@ watcher (or (:watcher @inst-atom)
   (destroy-inst! root-inst-atom container-widget container-tag)
   (reset! root-inst-atom nil))
 
-(defn ^:private run*
-  [root-fn opts]
-  (let [{:keys [app-id title width height auto-quit-ms]
-         :or {app-id "glimmer.app" title "glimmer" width 400 height 300}} opts
-        app (g/gtk-application-new app-id g/APPLICATION-DEFAULT-FLAGS)
-        activate (fn [_app _data]
-                   (let [win (g/gtk-application-window-new app)]
-                     (g/gtk-window-set-title win title)
-                     (g/gtk-window-set-default-size win width height)
-                     ;; mount as a component so the whole tree is reactive, and
-                     ;; record the live root so reload! can re-render it here.
-                     (reset! live-root {:window win :tag :window
-                                        :inst (mount win :window [root-fn])
-                                        :root-fn root-fn})
-                     (g/gtk-window-present win)
-                     (when auto-quit-ms
-                       (let [quit (ffi/foreign-callable
-                                    (fn [_data] (g/g-application-quit app) 0)
-                                    [:pointer] :int :collect-safe)]
-                         (w/retain-callable! quit)
-                         (g/g-timeout-add auto-quit-ms quit ffi/null)))))
-        activate-cb (ffi/foreign-callable activate [:pointer :pointer] :void :collect-safe)]
-    (w/retain-callable! activate-cb)
-    (g/g-signal-connect-data app "activate" activate-cb ffi/null ffi/null g/CONNECT-DEFAULT)
-    (try
-      (reset! gui-loop-running? true)
-      (g/g-application-run app 0 ffi/null)
-      (finally (reset! gui-loop-running? false)))))
-
 (defn run
-  "Run a GTK4 application. On :activate, a window is created and `root-fn` (a
-  thunk returning hiccup) is mounted into it as a reactive component. Blocks
-  until the app quits.
+  "Run an application with the installed backend. The backend creates a top-level
+  window, `root-fn` (a thunk returning hiccup) is mounted into it as a reactive
+  component, and the event loop runs until the app quits.
 
-  Options:
-    :app-id        GApplication id      (default \"glimmer.app\")
+  Options are passed through to the backend; the ones every backend understands:
+    :app-id        application id       (default \"glimmer.app\")
     :title         window title         (default \"glimmer\")
     :width         window width in px   (default 400)
     :height        window height in px  (default 300)
     :auto-quit-ms  if set, quit the loop after this many milliseconds
                    (smoke/automated tests).
 
-  On macOS, g_application_run must run on the process main thread or AppKit
-  aborts when it sets the main menu. Under `joltc nrepl-server` the primordial
-  thread parks in jolt.host/park-until-interrupt (a main-thread pump); this call
-  hops the boot onto it ASYNCHRONOUSLY via jolt.host/call-on-main-thread-async and
-  returns right away, so the nREPL eval that started the app completes and the
-  session stays live for reactive edits (swap! a ratom to re-render, or redefine
-  components and call glimmer.core/reload! to re-render the running window in
-  place — both marshal onto the main loop). The GUI itself then runs on that main
-  thread. Under `joltc run` (or any non-jolt host) there is no pump, so it runs
-  inline and blocks until the app quits."
+  Requiring a backend namespace installs it — see glimmer-gtk.core for GTK4."
   [root-fn & {:as opts}]
-  (let [start (fn [] (run* root-fn opts))]
-    (if-let [hop (resolve 'jolt.host/call-on-main-thread-async)]
-      (hop start)
-      (start))))
+  (b/run (or opts {})
+         (fn [window tag]
+           ;; mount as a component so the whole tree is reactive, and record the
+           ;; live root so reload! can re-render it in this same window.
+           (reset! live-root {:window window :tag tag
+                              :inst (mount window tag [root-fn])
+                              :root-fn root-fn}))))
 
 (defn reload!
-  "Re-mount the running app's root into its existing window, on the GTK main
-  thread. Call this from the nREPL REPL after redefining components to see the
-  changes in the SAME window, instead of opening a new one with run.
+  "Re-mount the running app's root into its existing window, on the UI thread.
+  Call this from the nREPL REPL after redefining components to see the changes in
+  the SAME window, instead of opening a new one with run.
 
   With no argument it re-mounts the current root component. That re-runs the root
   and re-resolves the child components it references, so redefinitions of those

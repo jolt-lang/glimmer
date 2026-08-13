@@ -9,7 +9,8 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y liblz4-1 zlib1g libtinfo6 libgtk-4-1
+          # No GUI libraries: the suite renders through an in-memory backend.
+          sudo apt-get install -y liblz4-1 zlib1g libtinfo6
           # Install through jolt's own install script rather than resolving the
           # release asset here: it owns the archive and binary naming (which
           # changed in v0.5.0, when the CLI was renamed from joltc to jolt) and

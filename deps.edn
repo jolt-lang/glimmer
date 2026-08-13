@@ -1,59 +1,12 @@
 {:paths ["src"]
 
- :deps {weavejester/hiccup
-        {:git/url "https://github.com/weavejester/hiccup"
-         :git/sha "b6b12097ba973141fe87c1b4d6a27ddcce5d5929"}}
+ ;; No dependencies, native or otherwise: glimmer is the portable half of the
+ ;; toolkit — reactive cells, the component model and the reconciler. Everything
+ ;; that touches a real widget lives behind glimmer.backend, in a backend project
+ ;; such as glimmer-gtk (GTK4). The tests render through an in-memory backend, so
+ ;; the whole suite is headless.
+ :deps {}
 
- ;; GTK4 and its GLib dependencies, bound natively via jolt.ffi. The shared
- ;; libraries are declared below; jolt loads them before the namespaces are
- ;; required. GTK4 links GLib/GObject/GIO transitively, but on macOS's
- ;; two-level namespace each library must be loaded explicitly so its symbols
- ;; resolve — the ordering reflects symbol ownership:
- ;;   glib-2.0    glib core
- ;;   gobject-2.0 g_object_*, g_signal_*
- ;;   gio-2.0     g_application_*
- ;;   gtk-4       gtk_* widget API
- ;;
- ;; macOS note: Chez's loader uses dlopen's default search path, which does NOT
- ;; include Homebrew's prefix, so the Homebrew full paths are tried first
- ;; (Apple Silicon then Intel); the bare names cover Linux's standard ld paths.
- :jolt/native [{:name "glib-2.0"
-                :darwin ["/opt/homebrew/lib/libglib-2.0.0.dylib"
-                         "/usr/local/lib/libglib-2.0.0.dylib"
-                         "libglib-2.0.0.dylib" "libglib-2.0.dylib"]
-                :linux  ["libglib-2.0.so.0" "libglib-2.0.so"]}
-               {:name "gobject-2.0"
-                :darwin ["/opt/homebrew/lib/libgobject-2.0.0.dylib"
-                         "/usr/local/lib/libgobject-2.0.0.dylib"
-                         "libgobject-2.0.0.dylib" "libgobject-2.0.dylib"]
-                :linux  ["libgobject-2.0.so.0" "libgobject-2.0.so"]}
-               {:name "gio-2.0"
-                :darwin ["/opt/homebrew/lib/libgio-2.0.0.dylib"
-                         "/usr/local/lib/libgio-2.0.0.dylib"
-                         "libgio-2.0.0.dylib" "libgio-2.0.dylib"]
-                :linux  ["libgio-2.0.so.0" "libgio-2.0.so"]}
-               {:name "gtk-4"
-                :darwin ["/opt/homebrew/lib/libgtk-4.1.dylib"
-                         "/usr/local/lib/libgtk-4.1.dylib"
-                         "libgtk-4.1.dylib" "libgtk-4.dylib"]
-                :linux  ["libgtk-4.so.1" "libgtk-4.so"]}]
+ :aliases {:test {:extra-paths ["test"] :main-opts ["-m" "glimmer.test-runner"]}}
 
- ;; A reactive GUI toolkit over GTK4 for jolt. See README.md.
- ;;
- ;; Each runnable has its own alias with :main-opts (jolt's -M:alias form needs
- ;; main-opts). Tasks are thin wrappers so you can run `jolt counter`, etc.
- :aliases {:test    {:extra-paths ["test"]     :main-opts ["-m" "glimmer.test-runner"]}
-           :counter {:extra-paths ["examples"] :main-opts ["-m" "glimmer.counter"]}
-           :todo    {:extra-paths ["examples"] :main-opts ["-m" "glimmer.todo"]}
-            :smoke   {:extra-paths ["examples"] :main-opts ["-m" "glimmer.reactivity-smoke"]}
-           :main-thread-smoke {:extra-paths ["examples"] :main-opts ["-m" "glimmer.main-thread-smoke"]}
-           :repl-live-smoke {:extra-paths ["examples"] :main-opts ["-m" "glimmer.repl-live-smoke"]}
-           :keyed   {:extra-paths ["examples"] :main-opts ["-m" "glimmer.keyed"]}}
-
-  :tasks {test    "jolt -M:test"
-          counter "jolt -M:counter"
-          todo    "jolt -M:todo"
-          smoke   "jolt -M:smoke"
-          main-thread-smoke "jolt -M:main-thread-smoke"
-          repl-live-smoke "jolt -M:repl-live-smoke"
-          keyed   "jolt -M:keyed"}}
+ :tasks {test "jolt -M:test"}}

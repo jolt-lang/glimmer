@@ -1,5 +1,6 @@
 (ns glimmer.ratom
-  "Reactive atoms for glimmer — a reagent-style reactive model over GTK4.
+  "Reactive atoms for glimmer — a reagent-style reactive model, with no ties to
+  any UI toolkit.
 
   Three reactive cell kinds, all read with @ and (for the mutable ones) written
   with reset!/swap! exactly like reagent:

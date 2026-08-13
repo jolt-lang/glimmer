@@ -1,13 +1,20 @@
 # glimmer
 
-A reactive GUI toolkit for [jolt](https://github.com/jolt-lang/jolt) over **GTK4**.
-You write reagent-style components that return hiccup; glimmer renders them to
-native GTK widgets and keeps the widget tree in sync as reactive state changes.
+A reactive GUI toolkit for [jolt](https://github.com/jolt-lang/jolt). You write
+reagent-style components that return hiccup; glimmer renders them to native
+widgets and keeps the widget tree in sync as reactive state changes.
+
+This project is the portable half: reactive cells, the component model and the
+reconciler. It has no dependencies and knows nothing about any toolkit. The
+widgets themselves come from a backend:
+
+- [glimmer-gtk](https://github.com/jolt-lang/glimmer-gtk) — GTK4
 
 ```clojure
 (ns myapp
   (:require [glimmer.ratom :as r :refer [atom]]
-            [glimmer.core :as ui]))
+            [glimmer.core :as ui]
+            [glimmer-gtk.core]))            ; installs the GTK4 backend
 
 (defn counter []
   (let [count (atom 0)]
@@ -24,27 +31,14 @@ native GTK widgets and keeps the widget tree in sync as reactive state changes.
 ```
 
 The outer `let` runs once (so `count` persists); the inner `fn` re-runs whenever
-`@count` changes, and glimmer patches the live GTK widgets in place instead of
-rebuilding them.
-
-## Requirements
-
-GTK4 and GLib must be installed.
-
-- macOS: `brew install gtk4`
-- Linux: `apt install libgtk-4-dev` (or your distro's equivalent)
-
-The native libraries (`glib-2.0`, `gobject-2.0`, `gio-2.0`, `gtk-4`) are declared
-in `deps.edn` under `:jolt/native` and loaded automatically when the namespaces
-are required.
+`@count` changes, and glimmer patches the live widgets in place instead of
+rebuilding them. Only the backend require names a toolkit — swapping GTK for
+another backend leaves the rest of that file alone.
 
 ## Running
 
 ```sh
-joltc test      # unit tests (glimmer.ratom — no display needed)
-joltc smoke     # reactivity smoke against the live GTK loop (needs a display)
-joltc counter   # interactive counter demo (opens a window, blocks)
-joltc todo      # interactive todo demo (opens a window, blocks)
+jolt test      # the whole suite, headless: no toolkit and no display needed
 ```
 
 ## Components
@@ -78,116 +72,102 @@ All in `glimmer.ratom`, all read with `@`:
   @label)   ; => "count is 0"
 ```
 
-## Hiccup reference
+## Hiccup
 
-Elements are `[:tag props? & children]`. `props` is an optional map; children
-may be native elements, component invocations (`[my-component arg]`), strings, or
-numbers (rendered as labels). `nil` children are skipped.
+Elements are `[:tag props? & children]`. `props` is an optional map; children may
+be native elements, component invocations (`[my-component arg]`), strings, or
+numbers (rendered as labels). `nil` children are skipped and seqs are spliced, so
+`(when cond [...])` leaves no hole and `(for [t tasks] [row t])` renders one
+widget per task.
 
-**Containers:** `:window` (single child), `:box` (`:orientation :horizontal|:vertical`),
-`:hbox`, `:vbox`, `:frame` (single child, with an optional `:label`),
-`:scrolled` (single child; the child scrolls instead of forcing the window bigger).
+Which tags and props exist is the backend's vocabulary — see
+[glimmer-gtk](https://github.com/jolt-lang/glimmer-gtk) for the GTK4 set
+(`:vbox`, `:label`, `:button`, `:on-click`, …).
 
-**Leaf widgets:** `:button`, `:label`, `:entry`, `:checkbutton`, `:separator`.
-
-**Common props (apply to every widget):** margins and alignment, resolved from
-idiomatic keywords at runtime (see [Enum constants](#enum-constants) below):
-
-- `:margin` (all four sides), or `:margin-start`/`:margin-end`/`:margin-top`/`:margin-bottom`
-- `:halign`/`:valign` — one of `:fill :start :end :center :baseline-fill :baseline-center`
-- `:hexpand`/`:vexpand` — boolean
-
-**Per-tag props:**
-
-- Window: `:title`, `:width`, `:height`, `:visible`
-- Box: `:orientation`, `:spacing`, `:homogeneous`
-- Button: `:label`, `:tooltip`, `:sensitive`
-- Label: `:label`/`:text`, `:markup` (Pango markup), `:xalign` (0.0–1.0),
-  `:wrap` (boolean), `:max-width-chars`/`:width-chars` (int — cap natural width so a
-  long line can't drive its container wider), `:lines` (int, with `:wrap`),
-  `:ellipsize` (`:none`/`:start`/`:middle`/`:end`)
-- Entry: `:text`, `:placeholder`, `:sensitive`
-- Checkbutton: `:label`, `:active`
-- Frame: `:label`
-- Scrolled: (none — built to scroll its child within the allotted area)
-
-**Events:**
-
-- `:on-click` — button clicked. Handler takes no args.
-- `:on-change` — entry text changed. Handler receives the current text.
-- `:on-activate` — entry activated (Enter). Handler takes no args.
-- `:on-toggled` — checkbutton toggled. Handler takes no args.
-
-Signals are connected once at mount. Handlers should close over reactive cells
-(not values), so the first render's closure stays correct for the widget's life.
-
-## Enum constants
-
-GTK enum/flag values (`GTK_ALIGN_START`, `GTK_ORIENTATION_VERTICAL`, …) are
-resolved **at runtime from keyword nicks**, not maintained as a constant table.
-Every GObject enum registers its members with a lowercase nick that *is* a
-Clojure keyword (`:start`, `:fill`, `:horizontal`); `glimmer.genum` looks the nick
-up in the GObject type registry and returns its integer value. So you write
-`:halign :start`, `:orientation :vertical` — no `GTK_ALIGN_*` constants anywhere
-in the library. A raw integer also works as a fallback.
-
-One wrinkle: a type is only in the registry once its owning widget class has
-initialized, so enum props are applied in the re-render path (where the widget
-already exists). Plain `#define` numeric macros (rare here) can't be resolved
-this way and are declared explicitly where truly needed.
+`:key` is the one prop the core reads itself: it makes a child's identity stable
+across renders. See below.
 
 ## Reconciliation
 
-Children are matched **positionally**: at each position the existing widget is
-reused when the tag matches (props re-applied) and replaced when it doesn't;
-surplus children are removed, new ones appended. Keyed reordering is not yet
-supported — render lists in a stable order.
+Children are matched **positionally** by default: at each position the existing
+widget is reused when the tag matches (props re-applied) and replaced when it
+doesn't; surplus children are removed and new ones appended.
+
+When every child in a list carries a `:key`, they are matched by **key** instead.
+A row's widget, its signal handlers and its component-local state then follow the
+item across insertions, removals and reorders, so a handler may safely close over
+per-item state:
+
+```clojure
+(into [:vbox {}]
+      (for [{:keys [id text]} @items]
+        [task-row {:key id} id text]))
+```
+
+A key may be given in the props map (`[:label {:key id}]`) or as metadata
+(`^{:key id} [:label ...]`), on native elements and component invocations alike.
+A list that mixes keyed and unkeyed children falls back to positional matching,
+so a missing key never silently mis-reconciles.
+
+## Backends
+
+A backend is a plain map of functions installed with `glimmer.backend/register!`.
+It says what a widget is and how to make, patch and arrange one; the core does
+the rest. The full contract is in the `glimmer.backend` namespace docstring:
+
+```clojure
+{:name           :gtk4
+ :create!        (fn [tag props] widget)          ; construct, apply props, wire events
+ :apply-props!   (fn [tag widget props])          ; re-apply on re-render
+ :append-child!  (fn [parent-tag parent child])
+ :remove-child!  (fn [parent-tag parent child])
+ :replace-child! (fn [parent-tag parent old new])
+ ;; optional
+ :reorder-child! (fn [parent-tag parent child sibling])
+ :schedule       (fn [work])                      ; run a thunk on the UI thread
+ :run            (fn [opts mount-root!])          ; the event loop, backing ui/run
+ :text->element  (fn [s] hiccup)}                 ; default [:label {:label s}]
+```
+
+A `widget` is whatever the backend wants — a native pointer, a record, a map. The
+core never inspects one, it only hands it back.
+
+Two implementations exist to work from: `glimmer-gtk.core` (real, over GTK4) and
+`glimmer.mock-backend` in this project's tests (an in-memory tree, which is how
+the reconciler is tested without a display).
+
+Threading: a toolkit that rejects widget mutation off its main thread sets
+`glimmer.backend/loop-running?` while its loop runs and supplies `:schedule`. The
+core then defers re-renders onto the UI thread — that is what lets an nREPL eval
+on a worker thread mutate a ratom and repaint safely. With no loop running,
+renders stay synchronous, which is what makes the tests deterministic.
 
 ## Architecture
 
-Five namespaces:
+Three namespaces:
 
 - **`glimmer.ratom`** — reactive cells and auto-dependency tracking. While a
   component renders, its re-render fn is bound as the current watcher; any cell
   read with `@` during that render subscribes the component to the cell.
-- **`glimmer.ffi`** — thin `defcfn` bindings to GTK4 / GLib. No logic.
-- **`glimmer.genum`** — resolves GObject enum members from keyword nicks
-  (`:start`, `:fill`) to their integer values at runtime via the GObject type
-  registry, so the library needs no enum-constant tables.
-- **`glimmer.widget`** — hiccup to GTK: tag to constructor, props to setters,
-  `:on-*` to GTK signals wired through `foreign-callable`. The tag and signal
-  registries are open: `register-widget!` adds a widget spec for a new tag (with
-  an optional `:connect` hook for signals that don't fit the uniform
-  `void(widget, data)` shape), and `register-signal!` maps a new `:on-*` event to
-  a GTK signal. This is how `glimmer-gl` adds `:gl-area` and `:scale` without
-  forking glimmer.
-- **`glimmer.core`** — the component model, positional reconciler, and the
-  `g_application_run` app loop.
+- **`glimmer.backend`** — the seam described above: the registry plus the
+  dispatch functions the reconciler calls.
+- **`glimmer.core`** — the component model, the reconciler (positional and
+  keyed), mount/unmount, and `run`/`reload!` on top of the backend's loop.
 
 The reactive model is a port of the one in
 [mr-clean](https://github.com/clojure-ic/mr-clean).
 
-## Extending the widget set
+## Live development
 
-A consumer can teach glimmer new hiccup tags at load time:
-
-```clojure
-(require '[glimmer.widget :as w])
-
-(w/register-widget! :my-thing
-  {:ctor      (fn [props] (make-the-gtk-widget props))
-   :apply     (fn [widget props] (re-apply props on re-render))
-   :container :none})          ; or :box / :window / :frame / :scrolled
-
-(w/register-signal! :on-input "value-changed"
-                    (fn [widget] (read-the-value widget)))  ; value-fn optional
-```
-
-See `glimmer-gl.gtk` for a worked example (`:gl-area`, `:scale`).
+While an app runs you can mutate a `defonce` reactive cell from the REPL and the
+UI repaints. After redefining components, `(glimmer.core/reload!)` re-mounts the
+root in the same window; pass a fn to swap the root component itself. State kept
+in top-level `defonce` cells survives a reload — state in a component's own `let`
+does not.
 
 ## Status
 
-Early. The widget set is small and the reconciler is positional. The reactive
-core (`atom`/`cursor`/`reaction`), the component model, and the GTK pipeline
-(mount, re-render on change, clean shutdown) are exercised by the unit tests and
-the reactivity smoke test.
+Early. The reactive core (`atom`/`cursor`/`reaction`), the component model and
+the reconciler (positional, keyed, mount/unmount, subscription teardown) are
+covered by the headless test suite; the GTK pipeline is exercised by the smoke
+tests in glimmer-gtk.

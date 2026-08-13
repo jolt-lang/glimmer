@@ -1,5 +1,5 @@
 (ns glimmer.test-runner
-  "Entry point for `joltc -M:test`. Requires each glimmer test namespace and runs
+  "Entry point for `jolt -M:test`. Requires each glimmer test namespace and runs
   clojure.test against it. Prints a summary; exits non-zero if anything failed
   (so the :test task fails CI)."
   (:require [clojure.test :as t]))
@@ -27,7 +27,8 @@
     :else nil))
 
 (defn -main [& _]
-  (let [namespaces '[glimmer.ratom-test glimmer.widget-test glimmer.core-test]]
+  (let [namespaces '[glimmer.ratom-test glimmer.backend-test
+                     glimmer.core-test glimmer.reconcile-test]]
     (doseq [ns namespaces]
       (try (require ns :reload)
            (catch Exception e
