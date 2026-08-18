@@ -73,6 +73,40 @@ All in `glimmer.ratom`, all read with `@`:
   @label)   ; => "count is 0"
 ```
 
+### Swapping in a backend
+
+`atom`, `cursor` and `reaction` all implement `glimmer.ratom/IReactiveCell`, the
+protocol that `@`, `reset!`, `swap!` and dependency tracking dispatch through.
+Implement it to back the reactive atom with something else — for example a
+durable atom that persists every mutation to a database:
+
+```clojure
+(require '[glimmer.ratom :as r :refer [atom]])
+
+(defrecord DurableAtom [id db state watches]
+  r/IReactiveCell
+  (-value [_] @state)
+  (-reset! [this v]
+    (let [old @state]
+      (when (not= old v)
+        (reset! state v)
+        (swap! db assoc id v)          ; persist here
+        (r/-notify-watches! this))
+      v))
+  (-add-watch! [_ w] (swap! watches conj w))
+  (-remove-watch! [_ w] (swap! watches disj w))
+  (-notify-watches! [this] (doseq [w @watches] (w this))))
+```
+
+A backend cell is a drop-in replacement: `@`, `reset!`, `swap!`, `cursor` and
+`reaction` all work on it unchanged.
+
+The protocol contract is small: `-value` reads the current value without
+registering a watcher; `-reset!` writes the value, notifies watchers only when
+it changes, and returns it; `-add-watch!`/`-remove-watch!` manage watcher fns
+(each receives the firing cell); `-notify-watches!` fires them. Read-only cells
+(reactions) signal by throwing from `-reset!`.
+
 ## Hiccup
 
 Elements are `[:tag props? & children]`. `props` is an optional map; children may
@@ -148,9 +182,10 @@ renders stay synchronous, which is what makes the tests deterministic.
 
 Three namespaces:
 
-- **`glimmer.ratom`** — reactive cells and auto-dependency tracking. While a
-  component renders, its re-render fn is bound as the current watcher; any cell
-  read with `@` during that render subscribes the component to the cell.
+- **`glimmer.ratom`** — reactive cells and auto-dependency tracking, behind the
+  `IReactiveCell` protocol (so backends can be swapped in). While a component
+  renders, its re-render fn is bound as the current watcher; any cell read with
+  `@` during that render subscribes the component to the cell.
 - **`glimmer.backend`** — the seam described above: the registry plus the
   dispatch functions the reconciler calls.
 - **`glimmer.core`** — the component model, the reconciler (positional and

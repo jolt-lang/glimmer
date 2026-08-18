@@ -1,6 +1,7 @@
 (ns glimmer.core-test
   (:require [clojure.test :refer [deftest is testing]]
-            [glimmer.core :as ui]))
+            [glimmer.core :as ui]
+            [glimmer.ratom :as r]))
 
 ;; flatten-children is the pure core of the reconciler's child handling: it
 ;; normalizes a parent's child forms before positional diffing. Lists must render
@@ -172,12 +173,12 @@
 ;; does this across the removed subtree). A disposed watcher must never render
 ;; again — its widgets are gone — and must prune itself from the cell that fired
 ;; it, so re-mounting against a long-lived (defonce) cell doesn't leave the old
-;; tree behind. A plain map with a :watches atom stands in for a reactive cell.
+;; tree behind. A real reactive cell stands in; its watch set is read via :watches.
 (deftest rerender-watcher-disposed-stops-and-unsubscribes
   (let [rendered (atom 0)
         disposed (atom false)
-        watches  (atom nil)
-        cell     {:watches watches}
+        cell     (r/atom nil)
+        watches  (:watches cell)
         w (ui/make-rerender-watcher #(swap! rendered inc)
                                     (atom false)      ; running? -> inline render
                                     (fn [f] (f))      ; schedule (unused inline)
