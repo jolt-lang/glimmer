@@ -177,3 +177,23 @@
     (is (= [] (mock/children c)) "the widget is gone from the container")
     (reset! n 2)
     (is (= 2 @renders) "a disposed watcher never renders again")))
+
+;; A native element replaced by one of another tag takes its subtree with it,
+;; and the components inside must be disposed with it. A watcher left alive
+;; stays subscribed to the cells it reads and renders again into a widget
+;; that is no longer in the tree.
+(deftest replacing-an-element-disposes-the-components-beneath-it
+  (let [c (container)
+        x (r/atom 0)
+        which (r/atom :a)
+        renders (atom 0)
+        leaf (fn [] (swap! renders inc) [:label {:label (str "x=" @x)}])
+        app (fn [] (if (= @which :a)
+                     [:vbox {} [:frame {} [leaf]]]
+                     [:vbox {} [:hbox {} [:label {:label "b"}]]]))]
+    (ui/mount c :box [app])
+    (is (= 1 @renders))
+    (reset! which :b)
+    (is (= [:hbox] (mock/tags (only-child c))) "the frame is replaced by the hbox")
+    (reset! x 1)
+    (is (= 1 @renders) "the leaf under the replaced frame never renders again")))

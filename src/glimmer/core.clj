@@ -316,7 +316,12 @@
       (let [widget (b/create! tag props)
             new {:type :native :tag tag :props props :widget widget :children []}]
         (if (and inst (= (:type inst) :native))
-          (b/replace-child! parent-tag parent-widget (:widget inst) widget)
+          (do
+            ;; native -> native of another tag: the old widget goes, and the
+            ;; component watchers in its subtree must go with it, or they keep
+            ;; rendering into a widget that is no longer in the tree.
+            (dispose-tree! inst-atom)
+            (b/replace-child! parent-tag parent-widget (:widget inst) widget))
           (do
             ;; comp -> native: the component owned no widget, but its expanded
             ;; children are parented here and its watchers are live. Tear both
