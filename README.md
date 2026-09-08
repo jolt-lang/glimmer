@@ -208,3 +208,7 @@ Early. The reactive core (`atom`/`cursor`/`reaction`), the component model and
 the reconciler (positional, keyed, mount/unmount, subscription teardown) are
 covered by the headless test suite; the GTK pipeline is exercised by the smoke
 tests in glimmer-gtk.
+
+## License
+
+MIT (see `LICENSE`).
