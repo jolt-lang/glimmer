@@ -126,3 +126,15 @@
     (dotimes [_ 6] (swap! a inc))
     (is (= 1 (count (clojure.core/deref (:watches a))))
         "a reaction must keep exactly one watch on a dependency across recomputes")))
+
+(deftest the-blocking-deref-survives-the-rebind
+  ;; the rebound deref replaces clojure.core/deref process-wide, so it has to
+  ;; forward the blocking arity host code uses to await a promise or a future.
+  (testing "a promise that is never delivered gives up and returns the fallback"
+    (is (= :timed-out (deref (promise) 5 :timed-out))))
+  (testing "a delivered promise returns its value"
+    (let [p (promise)]
+      (deliver p :ok)
+      (is (= :ok (deref p 500 :timed-out)))))
+  (testing "a reactive cell has its value already, so the timeout is unused"
+    (is (= 7 (deref (atom 7) 0 :timed-out)))))
