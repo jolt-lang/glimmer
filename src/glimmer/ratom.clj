@@ -132,10 +132,19 @@
 (defn deref
   "Read a reactive cell (registering a watcher if *current-watcher* is bound) or,
   for any other reference type, delegate to the host deref."
-  [x]
-  (if (reactive? x)
-    (do (track! x) (-value x))
-    (host-deref x)))
+  ;; Every host arity must be forwarded: this var replaces clojure.core/deref for
+  ;; the whole process, so dropping the blocking (timeout) arity breaks
+  ;; (deref promise-or-future ms fallback) in code that never mentions glimmer.
+  ;; A reactive cell never blocks — its value is always there — so the timeout
+  ;; is simply unused for one.
+  ([x]
+   (if (reactive? x)
+     (do (track! x) (-value x))
+     (host-deref x)))
+  ([x timeout-ms timeout-val]
+   (if (reactive? x)
+     (do (track! x) (-value x))
+     (host-deref x timeout-ms timeout-val))))
 
 (defn reset!
   "Write a value to a reactive cell, notifying watchers when the value actually
