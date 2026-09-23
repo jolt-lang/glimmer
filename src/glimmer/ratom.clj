@@ -208,7 +208,9 @@
       (when (not= old new)
         (notify! r)))))
 
-(defn- make-reaction
+;; Public: the `reaction` macro expands to a call of it in the caller's namespace,
+;; where a private var is refused (as on the JVM).
+(defn make-reaction
   "A read-only derived cell whose value is (f). f is run immediately and again
   whenever a reactive cell it derefs changes. Other components can subscribe to
   a reaction just like any reactive (read it with @ during render)."
