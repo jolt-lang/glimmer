@@ -19,24 +19,20 @@
               (println "  caused by:" (.getName (class c)) ":" (ex-message c))))
         (prn e)))))
 
-(defn- exit [code]
-  ;; Prefer the host exit when present (jolt exits the process); fall back to no-op.
-  (cond
-    (resolve 'jolt.host/exit) ((resolve 'jolt.host/exit) code)
-    (resolve 'System/exit)    ((resolve 'System/exit) code)
-    :else nil))
-
 (defn -main [& _]
   (let [namespaces '[glimmer.ratom-test glimmer.ratom-protocol-test
                      glimmer.backend-test glimmer.core-test glimmer.reconcile-test]]
-    (doseq [ns namespaces]
-      (try (require ns :reload)
-           (catch Exception e
-             (println "ERROR requiring" ns ":" (ex-message e)))))
-    (let [results (apply t/run-tests namespaces)
-          failed (+ (:fail results 0) (:error results 0))]
+    ;; A namespace that fails to load registers no tests, so run-tests alone
+    ;; would report it as a clean run; count it as a failure.
+    (let [load-errors (count (for [ns namespaces
+                                   :let [e (try (require ns :reload) nil
+                                                (catch Exception e e))]
+                                   :when e]
+                               (println "ERROR requiring" ns ":" (ex-message e))))
+          results (apply t/run-tests namespaces)
+          failed (+ (:fail results 0) (:error results 0) load-errors)]
       (println "----")
       (println "tests:" (:test results 0)
                "assertions:" (:pass results 0) "passed /"
                failed "failed")
-      (when (pos? failed) (exit 1)))))
+      (when (pos? failed) (System/exit 1)))))
