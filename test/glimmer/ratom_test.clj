@@ -138,3 +138,24 @@
       (is (= :ok (deref p 500 :timed-out)))))
   (testing "a reactive cell has its value already, so the timeout is unused"
     (is (= 7 (deref (atom 7) 0 :timed-out)))))
+
+(deftest concurrent-swaps-lose-nothing
+  ;; swap! used to read the value and reset! it in two steps, so two threads
+  ;; swapping at once could both read the same value and one write was lost.
+  (testing "ratom"
+    (let [a (atom 0)
+          fired (clojure.core/atom 0)
+          _ (r/-add-watch! a (fn [_] (clojure.core/swap! fired inc)))
+          threads (doall (for [_ (range 8)]
+                           (doto (Thread. (fn [] (dotimes [_ 500] (swap! a inc)))) (.start))))]
+      (doseq [t threads] (.join t))
+      (is (= 4000 @a))
+      (is (= 4000 @fired) "every change notifies once")))
+  (testing "cursor"
+    (let [a (atom {:n {:k 0}})
+          c (cursor a [:n :k])
+          threads (doall (for [_ (range 8)]
+                           (doto (Thread. (fn [] (dotimes [_ 500] (swap! c inc)))) (.start))))]
+      (doseq [t threads] (.join t))
+      (is (= 4000 @c))
+      (is (= {:n {:k 4000}} @a)))))

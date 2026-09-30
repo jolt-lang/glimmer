@@ -65,6 +65,13 @@
   (-remove-watch! [this watcher])
   (-notify-watches! [this]))
 
+(defprotocol IAtomicSwap
+  "A cell that can apply a function to its value atomically. swap! uses it
+  when a cell has it; without it, swap! reads the value and resets it, which
+  loses a write when two threads swap at once."
+  (-swap! [this f] "Set the value to (f value) atomically, notify watchers on
+  change, and return the new value."))
+
 ;; --- built-in reactive cells -------------------------------------------------
 ;; Records rather than plain maps: protocol dispatch is per-type, so the three
 ;; cell kinds each extend IReactiveCell below. Keyword lookup (:state, :watches,
@@ -74,16 +81,21 @@
   IReactiveCell
   (-value [_] (host-deref state))
   (-reset! [this v]
-    (let [old (host-deref state)]
+    (let [[old _] (reset-vals! state v)]
       (when (not= old v)
-        (host-reset! state v)
         (-notify-watches! this))
       v))
   (-add-watch! [_ w] (host-swap! watches clojure.core/conj w))
   (-remove-watch! [_ w] (host-swap! watches clojure.core/disj w))
   (-notify-watches! [this]
     (doseq [w (host-deref watches)]
-      (w this))))
+      (w this)))
+  IAtomicSwap
+  (-swap! [this f]
+    (let [[old new] (swap-vals! state f)]
+      (when (not= old new)
+        (-notify-watches! this))
+      new)))
 
 (defrecord Cursor [src path watches]
   IReactiveCell
@@ -95,7 +107,14 @@
   (-remove-watch! [_ w] (host-swap! watches clojure.core/disj w))
   (-notify-watches! [this]
     (doseq [w (host-deref watches)]
-      (w this))))
+      (w this)))
+  IAtomicSwap
+  (-swap! [_ f]
+    (if (satisfies? IAtomicSwap src)
+      (get-in (-swap! src #(update-in % path f)) path)
+      (let [v (f (get-in (-value src) path))]
+        (-reset! src (assoc-in (-value src) path v))
+        v))))
 
 (defrecord Reaction [f state watches trigger]
   IReactiveCell
@@ -166,11 +185,13 @@
   ([x f]
    (cond
      (reaction? x) (throw (ex-info "a reaction is read-only" {:cell x}))
+     (satisfies? IAtomicSwap x) (-swap! x f)
      (reactive? x) (reset! x (f (-value x)))
      :else (host-swap! x f)))
   ([x f & args]
    (cond
      (reaction? x) (throw (ex-info "a reaction is read-only" {:cell x}))
+     (satisfies? IAtomicSwap x) (-swap! x #(apply f % args))
      (reactive? x) (reset! x (apply f (-value x) args))
      :else (apply host-swap! x f args))))
 
