@@ -88,6 +88,36 @@ values are still the ones the result came from.
   (r/capture #(+ @a @b)))   ; => [3 [a b]]
 ```
 
+### Tables: derived state that follows the change
+
+A reaction over a collection recomputes from scratch, so with a thousand rows
+one changed row costs a thousand. `glimmer.table` has keyed collections whose
+derived cells do the work of the change instead, after DBSP (Budiu et al.,
+*Automatic Incremental View Maintenance for Rich Query Languages*): a map or
+filter only looks at the rows that changed, and an aggregate with an inverse
+(a count, a sum) takes the old row out and puts the new one in.
+
+```clojure
+(require '[glimmer.table :as t])
+
+(def todos (t/table {1 {:title "a" :done false}}))
+(def open (t/view todos (fn [_ v] (when-not (:done v) v))))     ; rows, nil drops
+(def open-count (t/aggregate open t/count-of))
+(def by-done (t/aggregate todos t/count-of (fn [_ v] (:done v)))) ; {false 1}
+
+(t/put! todos 2 {:title "b" :done true})   ; costs one row, not the table
+(t/delete! todos 1)
+@open-count   ; => 0
+```
+
+All of them are reactive cells, read with `@`. Views and grouped aggregates are
+tables to further views and aggregates. An aggregate is
+`{:init x :add (fn [acc row]) :sub (fn [acc row])}`, where `sub` undoes `add`;
+`count-of` and `(sum-of f)` are provided. Something without an inverse, a max
+or a sort, belongs in a reaction. `swap!` and `reset!` on a table work too, but
+find what changed by comparing every row. Derived cells stay registered on
+their source, so `def` them rather than making them per render.
+
 ### Swapping in a backend
 
 `atom`, `cursor` and `reaction` all implement `glimmer.ratom/IReactiveCell`, the
