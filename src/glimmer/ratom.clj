@@ -107,7 +107,13 @@
     (doseq [w (host-deref watches)]
       (w this))))
 
-(defn- reactive? [x] (satisfies? IReactiveCell x))
+;; Every @ in the process comes through deref below once this namespace has
+;; loaded, most of them on plain host atoms. satisfies? costs about seven times
+;; an instance? check on jolt, which made every host @ eleven times slower, so a
+;; host atom is recognised first and the protocol is asked only about the rest.
+(defn- host-atom? [x] (instance? clojure.lang.Atom x))
+
+(defn- reactive? [x] (and (not (host-atom? x)) (satisfies? IReactiveCell x)))
 (defn- reaction? [x] (instance? Reaction x))
 (defn- cursor? [x] (instance? Cursor x))
 
@@ -193,11 +199,13 @@
   ;; hit it; the reconciler storing a nil :key for an unkeyed child did.
   ([x f]
    (cond
+     (host-atom? x) (host-swap! x f)
      (reaction? x) (throw (ex-info "a reaction is read-only" {:cell x}))
      (reactive? x) (reset! x (f (-value x)))
      :else (host-swap! x f)))
   ([x f & args]
    (cond
+     (host-atom? x) (apply host-swap! x f args)
      (reaction? x) (throw (ex-info "a reaction is read-only" {:cell x}))
      (reactive? x) (reset! x (apply f (-value x) args))
      :else (apply host-swap! x f args))))
