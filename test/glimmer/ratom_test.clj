@@ -159,3 +159,33 @@
       (doseq [t threads] (.join t))
       (is (= 4000 @c))
       (is (= {:n {:k 4000}} @a)))))
+
+(deftest capture-reports-dereffed-cells
+  (testing "each cell read, once, in first-read order"
+    (let [a (atom 1) b (atom 1) c (cursor (atom {:x 2}) [:x])
+          [v cells] (r/capture (fn [] (+ @a @b @a @c)))]
+      (is (= 5 v))
+      ;; a and b hold equal values but are different cells
+      (is (= 3 (count cells)))
+      (is (identical? a (first cells)))
+      (is (identical? b (second cells)))))
+  (testing "plain host atoms are not reported"
+    (let [h (clojure.core/atom 1)
+          [_ cells] (r/capture (fn [] @h))]
+      (is (= [] cells))))
+  (testing "nested captures: the outer one sees the inner one's cells"
+    (let [a (atom 1) b (atom 2)
+          inner (clojure.core/atom nil)
+          [_ outer] (r/capture (fn []
+                                 @a
+                                 (reset! inner (second (r/capture (fn [] @b))))))]
+      (is (= [b] @inner))
+      (is (= [a b] outer))))
+  (testing "capture leaves watcher registration alone"
+    (let [a (atom 1)
+          fired (clojure.core/atom 0)
+          w (fn [_] (swap! fired inc))]
+      (binding [r/*current-watcher* w]
+        (r/capture (fn [] @a)))
+      (reset! a 2)
+      (is (= 1 @fired)))))

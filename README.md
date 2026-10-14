@@ -73,6 +73,21 @@ All in `glimmer.ratom`, all read with `@`:
   @label)   ; => "count is 0"
 ```
 
+### Capturing dependencies
+
+`(r/capture f)` runs `f` and returns `[result cells]`: the value and every
+reactive cell `f` dereffed, once each, in the order first read. It only
+observes: watcher registration goes on as usual, and captures nest, so an outer
+capture also sees the cells an inner one read. A cache of rendered output uses
+it to store a result alongside the cells it was built from; on a later hit it
+re-reads those cells (which re-subscribes the current watcher) and checks their
+values are still the ones the result came from.
+
+```clojure
+(let [a (atom 1) b (atom 2)]
+  (r/capture #(+ @a @b)))   ; => [3 [a b]]
+```
+
 ### Swapping in a backend
 
 `atom`, `cursor` and `reaction` all implement `glimmer.ratom/IReactiveCell`, the
