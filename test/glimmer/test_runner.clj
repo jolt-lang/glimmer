@@ -29,12 +29,16 @@
 (defn -main [& _]
   (let [namespaces '[glimmer.ratom-test glimmer.ratom-protocol-test
                      glimmer.backend-test glimmer.core-test glimmer.reconcile-test]]
-    (doseq [ns namespaces]
-      (try (require ns :reload)
-           (catch Exception e
-             (println "ERROR requiring" ns ":" (ex-message e)))))
-    (let [results (apply t/run-tests namespaces)
-          failed (+ (:fail results 0) (:error results 0))]
+    ;; a namespace that fails to load runs none of its tests, so it has to
+    ;; count as a failure: otherwise the suite passes having skipped it
+    (let [load-errors (count
+                       (remove true?
+                               (for [ns namespaces]
+                                 (try (require ns :reload) true
+                                      (catch Exception e
+                                        (println "ERROR requiring" ns ":" (ex-message e)))))))
+          results (apply t/run-tests namespaces)
+          failed (+ (:fail results 0) (:error results 0) load-errors)]
       (println "----")
       (println "tests:" (:test results 0)
                "assertions:" (:pass results 0) "passed /"

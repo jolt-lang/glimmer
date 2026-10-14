@@ -111,9 +111,16 @@
 (defn- reaction? [x] (instance? Reaction x))
 (defn- cursor? [x] (instance? Cursor x))
 
+;; Bound by `capture` to a fn of one cell, called for every reactive cell
+;; dereffed. Independent of *current-watcher*: capture only observes which cells
+;; were read, it subscribes nothing.
+(def ^:dynamic *on-deref* nil)
+
 (defn- track! [r]
   (when *current-watcher*
-    (-add-watch! r *current-watcher*)))
+    (-add-watch! r *current-watcher*))
+  (when *on-deref*
+    (*on-deref* r)))
 
 (defn- notify! [r]
   (-notify-watches! r))
@@ -127,6 +134,27 @@
   (when (reactive? r)
     (-remove-watch! r w))
   nil)
+
+(defn capture
+  "Run (f) and return [result cells]: f's value and the reactive cells it
+  dereffed, each once, in the order first read. Watcher registration is
+  untouched, so a render that is being captured still subscribes as usual.
+  Captures nest: an outer capture also sees every cell an inner one does.
+
+  This is what a cache of rendered output needs: store the cells with the
+  result, and on a later hit re-read them (@ re-subscribes the current
+  watcher) and compare their values with the ones the result was built from."
+  [f]
+  (let [seen   (clojure.core/atom #{})
+        cells  (clojure.core/atom [])
+        outer  *on-deref*
+        record (fn [r]
+                 (when-not (contains? (host-deref seen) r)
+                   (host-swap! seen conj r)
+                   (host-swap! cells conj r))
+                 (when outer (outer r)))
+        result (binding [*on-deref* record] (f))]
+    [result (host-deref cells)]))
 
 ;; --- the dispatching deref / reset! / swap! ----------------------------------
 (defn deref
@@ -208,7 +236,9 @@
       (when (not= old new)
         (notify! r)))))
 
-(defn- make-reaction
+;; Public because the `reaction` macro expands to a call to it in the caller's
+;; namespace; use the macro.
+(defn make-reaction
   "A read-only derived cell whose value is (f). f is run immediately and again
   whenever a reactive cell it derefs changes. Other components can subscribe to
   a reaction just like any reactive (read it with @ during render)."
