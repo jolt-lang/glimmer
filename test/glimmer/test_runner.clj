@@ -20,7 +20,7 @@
         (prn e)))))
 
 (defn -main [& _]
-  (let [namespaces '[glimmer.ratom-test glimmer.ratom-protocol-test
+  (let [namespaces '[glimmer.ratom-test glimmer.ratom-protocol-test glimmer.table-test
                      glimmer.backend-test glimmer.core-test glimmer.reconcile-test]]
     ;; A namespace that fails to load registers no tests, so run-tests alone
     ;; would report it as a clean run; count it as a failure.
