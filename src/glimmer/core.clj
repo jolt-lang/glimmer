@@ -66,7 +66,8 @@
   the watcher never renders again (its widgets are gone) and, on the next change,
   removes itself from the notifying cell — so re-mounting against a long-lived
   (defonce) cell doesn't leave the old tree rendering into destroyed widgets or
-  pile up dead watchers."
+  pile up dead watchers. Component subscription scopes also detach every tracked
+  cell immediately at disposal, so that pruning is only a backstop."
   ([render] (make-rerender-watcher render b/loop-running? b/schedule (atom false)))
   ([render running? schedule] (make-rerender-watcher render running? schedule (atom false)))
   ([render running? schedule disposed]
@@ -79,7 +80,7 @@
                  (if (not @running?)
                    (render)
                    (when (compare-and-set! pending false true)
-                     (schedule (fn [] (reset! pending false) (render))))))))
+                     (schedule (fn [] (reset! pending false) (when-not @disposed (render)))))))))
      @self)))
 
 ;; --- hiccup parsing ----------------------------------------------------------
@@ -208,7 +209,7 @@
 
 (defn- dispose-tree!
   "Mark every component watcher in the instance subtree disposed, so it stops
-  rendering and prunes itself from its reactive cells on the next change. Pure
+  rendering and immediately detaches its reactive subscriptions. Pure
   bookkeeping (no widget calls), so unlike destroy-inst! it recurses the whole
   tree regardless of which instances own widgets. Called wherever a subtree is
   removed (unmount, surplus/removed children) so subscriptions don't outlive the
@@ -218,6 +219,7 @@
   (when inst-atom
     (let [inst @inst-atom]
       (when-let [d (:disposed inst)] (reset! d true))
+      (r/clear-subscriptions! (:subscription-scope inst))
       (doseq [child (:children inst)]
         (dispose-tree! child)))))
 
@@ -235,21 +237,26 @@
     (doseq [i (range n (count old))]
       (dispose-tree! (nth old i))
       (destroy-inst! (nth old i) parent-widget parent-tag))
+    ;; Publish slots before rendering: a failed sibling must still be disposable.
+    (swap! inst-atom assoc :children reused)
     ;; reconcile each child into its (possibly new) atom
     (doseq [i (range n)]
-      (reconcile-el! parent-widget parent-tag (nth new-children i) (nth reused i)))
-    (swap! inst-atom assoc :children reused)))
+      (reconcile-el! parent-widget parent-tag (nth new-children i) (nth reused i)))))
 
 (defn- reorder-keyed-widgets!
   "Force `child-atoms`' widgets into the given order within the parent, moving
   each widget to sit after the previous one (the first goes to position 0).
   Called only when keyed-plan says a reorder is needed. Repositioning does not
   recreate widgets, so signal handlers and the instance atoms stay intact. A
-  no-op for backends without ordered containers."
+  keyed component that rendered nil contributes no widget, so its slot is
+  skipped and the next present widget goes after the nearest present one
+  before it, never after a nil handle. A no-op for backends without ordered
+  containers."
   [parent-widget parent-tag child-atoms]
   ;; resolve each child to its contributed widget — a keyed child may be a
-  ;; component, whose widget lives one level down on its expanded child.
-  (let [widgets (vec (map inst-widget child-atoms))
+  ;; component, whose widget lives one level down on its expanded child, or
+  ;; nothing at all when the component rendered nil.
+  (let [widgets (vec (keep inst-widget child-atoms))
         n (count widgets)]
     (when (pos? n)
       (doseq [i (range n)]
@@ -286,13 +293,14 @@
                              (if (= :reuse (:kind slot))
                                (get old-by-key (:key slot))
                                (atom nil))))]
+      ;; Publish slots before rendering: a failed sibling must still be disposable.
+      (swap! inst-atom assoc :children child-atoms)
       (doseq [i (range (count child-atoms))]
         (let [a (nth child-atoms i)]
           (reconcile-el! parent-widget parent-tag (nth new-children i) a)
           (swap! a assoc :key (nth new-keys i))))
       (when reorder?
-        (reorder-keyed-widgets! parent-widget parent-tag child-atoms))
-      (swap! inst-atom assoc :children child-atoms))))
+        (reorder-keyed-widgets! parent-widget parent-tag child-atoms)))))
 
 (defn- reconcile-children!
   "Reconcile `new-children` (hiccup) against the instance's existing children.
@@ -314,8 +322,9 @@
       (do (b/apply-props! tag (:widget inst) props)
           (swap! inst-atom assoc :props props))
       (let [widget (b/create! tag props)
-            new {:type :native :tag tag :props props :widget widget :children []}]
-        (if (and inst (= (:type inst) :native))
+            new {:type :native :tag tag :props props :widget widget :children []}
+            replacing? (and inst (= (:type inst) :native))]
+        (if replacing?
           (do
             ;; native -> native of another tag: the old widget goes, and the
             ;; component watchers in its subtree must go with it, or they keep
@@ -361,18 +370,18 @@
                    (if (seq m) (cons m (rest raw)) (rest raw)))
                  raw))
         cur @inst-atom
-        cached-render-fn (:render-fn cur)]
+        cached-render-fn (when (= f (first (:v cur))) (:render-fn cur))]
     ;; native -> comp: a component has no widget of its own, so a native element
     ;; previously mounted here would be left parented behind the expanded child.
     ;; Reset to a fresh comp skeleton — its native :type/:tag/:widget must NOT
     ;; survive, or a later comp->native transition would mistake the stale :type
     ;; and deref a nil :widget.
     (when (and (:widget cur) (not= :comp (:type cur)))
-      (b/remove-child! parent-tag parent-widget (:widget cur))
-      ;; dispose before resetting: the reset replaces the map that holds the
-      ;; subtree's :disposed atoms, so a dispose after it can no longer reach
-      ;; them and their watchers would keep firing against the reset instance.
+      ;; dispose before removing and resetting: the reset replaces the map that
+      ;; holds the subtree's :disposed atoms, so a dispose after it can no longer
+      ;; reach them and their watchers would keep firing against the reset instance.
       (dispose-tree! inst-atom)
+      (b/remove-child! parent-tag parent-widget (:widget cur))
       (reset! inst-atom {:children [(atom nil)]}))
     ;; ensure exactly one child slot for the expanded root. Use `seq`, not
     ;; truthiness: a native leaf carries :children [], which is truthy but empty —
@@ -381,20 +390,25 @@
     ;; stash the current invocation so the watcher always uses fresh args.
     ;; Without this a Form-1 child that subscribes to its own reactives
     ;; re-renders with the initial v from mount, overwriting parent updates.
-    (swap! inst-atom assoc :v v)
+    ;; A different component fn at this slot must not keep the previous one's
+    ;; Form-2 render fn, or the next re-render would draw the old component.
+    (swap! inst-atom (fn [c] (cond-> (assoc c :v v :type :comp)
+                               (nil? cached-render-fn) (dissoc :render-fn))))
     (let [child-atom (first (:children @inst-atom))
           ;; subscribe: any reactive read during render re-runs just this component.
           ;; The watcher is cached on the instance so it's the SAME fn every render;
           ;; a fresh closure would grow each cell's watch set on every re-render.
-watcher (or (:watcher @inst-atom)
-            ;; disposed is flipped by dispose-tree! on unmount; the watcher stops
-            ;; rendering and prunes itself from its cells once set.
-            (let [disposed (atom false)
-                  w (make-rerender-watcher
-                      (rerender-thunk reconcile-comp! parent-widget parent-tag inst-atom)
-                      b/loop-running? b/schedule disposed)]
-              (swap! inst-atom assoc :watcher w :disposed disposed) w))
-          hiccup (binding [r/*current-watcher* watcher]
+          watcher (or (:watcher @inst-atom)
+                      ;; Disposal detaches the scope and fences already-queued renders.
+                      (let [disposed (atom false)
+                            w (make-rerender-watcher
+                                (rerender-thunk reconcile-comp! parent-widget parent-tag inst-atom)
+                                b/loop-running? b/schedule disposed)]
+                        (swap! inst-atom assoc :watcher w :disposed disposed
+                               :subscription-scope (r/watch-scope w)) w))
+          scope (:subscription-scope @inst-atom)
+          _ (r/clear-subscriptions! scope)
+          hiccup (binding [r/*current-watcher* watcher r/*watch-scope* scope]
                    (if cached-render-fn
                      (cached-render-fn)                       ; Form-2: cached render fn
                      (let [result (apply f args)]             ; first invocation
@@ -407,7 +421,9 @@ watcher (or (:watcher @inst-atom)
   "Reconcile one hiccup element (native, component, or primitive) into inst-atom."
   [parent-widget parent-tag el inst-atom]
   (cond
-    (nil? el) nil
+    (nil? el) (do (dispose-tree! inst-atom)
+                  (destroy-inst! inst-atom parent-widget parent-tag)
+                  (reset! inst-atom nil))
     (string? el) (reconcile-native! parent-widget parent-tag (b/text->element el) inst-atom)
     (number? el) (reconcile-native! parent-widget parent-tag (b/text->element (str el)) inst-atom)
     (vector? el)
@@ -422,19 +438,29 @@ watcher (or (:watcher @inst-atom)
 (defn mount
   "Mount `hiccup` (a native element, a component invocation [fn args...], or a
   primitive) into a container widget. Returns the root instance atom. Wrap a
-  plain function in a vector ([my-app]) so it reconciles as a reactive component."
+  plain function in a vector ([my-app]) so it reconciles as a reactive component.
+  If rendering fails part-way, the subtree created so far is disposed and its
+  subscriptions detached before the error propagates."
   [container-widget container-tag hiccup]
   (let [root (atom nil)]
-    (reconcile-el! container-widget container-tag hiccup root)
-    root))
+    (try
+      (reconcile-el! container-widget container-tag hiccup root)
+      root
+      (catch Throwable error
+        (dispose-tree! root)
+        (try (destroy-inst! root container-widget container-tag)
+             (catch Throwable _ nil))
+        (throw error)))))
 
 (defn unmount!
   "Remove a mounted root (the atom returned by mount) from its container, tearing
-  down its reactive subscriptions first so nothing renders into the removed tree."
+  down its reactive subscriptions first so nothing renders into the removed tree.
+  The root atom is cleared even when the backend fails to remove the widget, so
+  a retry afterwards is a no-op."
   [root-inst-atom container-widget container-tag]
   (dispose-tree! root-inst-atom)
-  (destroy-inst! root-inst-atom container-widget container-tag)
-  (reset! root-inst-atom nil))
+  (try (destroy-inst! root-inst-atom container-widget container-tag)
+       (finally (reset! root-inst-atom nil))))
 
 (defn run
   "Run an application with the installed backend. The backend creates a top-level

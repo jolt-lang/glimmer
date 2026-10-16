@@ -163,6 +163,36 @@
       (is (= "x" (:label (:props @lbl))))
       (is (not (contains? (:props @lbl) :key))))))
 
+;; A keyed component that renders nil contributes no widget, so a reorder of its
+;; parent's children must skip that slot — both as the widget to move and as the
+;; predecessor of the next one. Passing the slot through would hand the backend
+;; a nil handle (the mock backend derefs it and throws).
+(deftest keyed-reorder-skips-components-that-rendered-nil
+  (let [c (container)
+        show-b? (r/atom true)
+        order (r/atom [:a :b :c])
+        row (fn [k] [:label {:label (name k)}])
+        comps {:a (fn [] (row :a))
+               :b (fn [] (when @show-b? (row :b)))
+               :c (fn [] (row :c))}
+        app (fn [] (into [:vbox {}] (for [k @order] [(comps k) {:key k}])))]
+    (ui/mount c :box [app])
+    (let [vbox (only-child c)
+          before (by-label vbox)]
+      (is (= ["a" "b" "c"] (labels vbox)))
+      (reset! show-b? false)
+      (is (= ["a" "c"] (labels vbox)))
+      (testing "reordering around the hidden component moves only the present widgets"
+        (reset! order [:c :b :a])
+        (is (= ["c" "a"] (labels vbox)))
+        (is (= (select-keys before ["a" "c"]) (by-label vbox)) "and reuses them"))
+      (testing "once visible again the component takes part in a further reorder"
+        (reset! show-b? true)
+        (is (= 3 (count (mock/children vbox))))
+        (reset! order [:a :b :c])
+        (is (= ["a" "b" "c"] (labels vbox)))
+        (is (= (select-keys before ["a" "c"]) (select-keys (by-label vbox) ["a" "c"])))))))
+
 ;; --- unmount -----------------------------------------------------------------
 (deftest unmount-removes-the-tree-and-stops-the-watchers
   (let [c (container)
