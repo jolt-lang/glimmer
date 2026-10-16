@@ -216,6 +216,8 @@ the rest. The full contract is in the `glimmer.backend` namespace docstring:
  :reorder-child! (fn [parent-tag parent child sibling])
  :schedule       (fn [work])                      ; run a thunk on the UI thread
  :run            (fn [opts mount-root!])          ; the event loop, backing ui/run
+ :run-lifecycle  (fn [opts lifecycle])            ; own the root's lifetime instead; see below
+ :dispose!       (fn [widget])                    ; release a widget that could not be attached
  :text->element  (fn [s] hiccup)}                 ; default [:label {:label s}]
 ```
 
@@ -233,6 +235,16 @@ core then defers re-renders onto the UI thread — that is what lets an nREPL ev
 on a worker thread mutate a ratom and repaint safely. With no loop running,
 renders stay synchronous, which is what makes the tests deterministic.
 
+Lifecycle: with `:run` the core mounts the root into the container the backend
+hands it and detaches the root's subscriptions when the loop returns. A backend
+that owns native resources implements `:run-lifecycle` instead. It receives the
+options and a map of `:mount!` (called with the container and its tag),
+`:unmount!` and `:abandon!` thunks, and calls `:unmount!` on its UI thread
+before destroying the container, or `:abandon!` when the native side is already
+gone and only the subscriptions remain. Roots a backend mounts itself with
+`glimmer.core/mount` get the same two operations as `unmount!` and `abandon!`.
+`:dispose!` receives a widget the core created but could not attach.
+
 ## Architecture
 
 Three namespaces:
@@ -244,7 +256,8 @@ Three namespaces:
 - **`glimmer.backend`** — the seam described above: the registry plus the
   dispatch functions the reconciler calls.
 - **`glimmer.core`** — the component model, the reconciler (positional and
-  keyed), mount/unmount, and `run`/`reload!` on top of the backend's loop.
+  keyed), mount/unmount/abandon, and `run`/`reload!` on top of the backend's
+  loop or lifecycle seam.
 
 The reactive model is a port of the one in
 [mr-clean](https://github.com/clojure-ic/mr-clean).
@@ -255,7 +268,7 @@ While an app runs you can mutate a `defonce` reactive cell from the REPL and the
 UI repaints. After redefining components, `(glimmer.core/reload!)` re-mounts the
 root in the same window; pass a fn to swap the root component itself. State kept
 in top-level `defonce` cells survives a reload — state in a component's own `let`
-does not.
+does not. A reload queued before the app exits does not touch a later run.
 
 ## Status
 
