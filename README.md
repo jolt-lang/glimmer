@@ -181,7 +181,10 @@ across renders. See below.
 
 Children are matched **positionally** by default: at each position the existing
 widget is reused when the tag matches (props re-applied) and replaced when it
-doesn't; surplus children are removed and new ones appended.
+doesn't; surplus children are removed and new ones appended. A component that
+renders `nil` contributes no widget; when it later renders an element, the widget
+is placed where its slot sits among its siblings (on backends with
+`:reorder-child!`), not at the end of the container.
 
 When every child in a list carries a `:key`, they are matched by **key** instead.
 A row's widget, its signal handlers and its component-local state then follow the
