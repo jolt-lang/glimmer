@@ -27,7 +27,8 @@
                     immediately after `sibling` (nil = first position). Backends
                     whose containers have no meaningful order may omit it; keyed
                     reconciliation then still reuses widgets, it just can't
-                    reorder them.
+                    reorder them, and a widget a slot gains late stays where it
+                    was appended.
     :schedule       (fn [work]) run a zero-arg thunk on the UI thread. Needed by
                     backends that set `loop-running?`; the default runs `work`
                     inline, which is what a headless backend wants.

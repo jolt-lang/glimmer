@@ -42,6 +42,10 @@ another backend leaves the rest of that file alone.
 jolt test      # the whole suite, headless: no toolkit and no display needed
 ```
 
+glimmer needs jolt 0.8.22 or newer. Earlier releases give every atom the same
+hash, and the reconciler keeps maps keyed by its instance atoms, whose lookups
+would then grow with the number of children.
+
 ## Components
 
 Two shapes, exactly like reagent:
@@ -198,6 +202,13 @@ A key may be given in the props map (`[:label {:key id}]`) or as metadata
 (`^{:key id} [:label ...]`), on native elements and component invocations alike.
 A list that mixes keyed and unkeyed children falls back to positional matching,
 so a missing key never silently mis-reconciles.
+
+A widget a child gains after its siblings have theirs, such as a component that
+rendered nil and now renders an element, or a keyed row created ahead of the
+others, is moved to where its slot sits among them rather than left at the end.
+A keyed reorder moves only the rows that left their relative order, so one row
+moved through a list of a thousand costs one move. Both use the backend's
+optional `:reorder-child!`; a backend without it keeps the appended order.
 
 ## Backends
 
