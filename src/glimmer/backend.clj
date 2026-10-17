@@ -20,6 +20,9 @@
 
   Optional keys:
 
+    :dispose!       (fn [widget]) dispose an unattached widget on mount failure.
+    :run-lifecycle  (fn [opts lifecycle]) explicit root ownership; see run-lifecycle.
+
     :reorder-child! (fn [parent-tag parent child sibling]) move `child` to sit
                     immediately after `sibling` (nil = first position). Backends
                     whose containers have no meaningful order may omit it; keyed
@@ -136,3 +139,27 @@
   top-level container widget and its tag once it exists; the loop then blocks."
   [opts mount-root!]
   ((op :run) opts mount-root!))
+
+(defn dispose-widget!
+  "Dispose an unattached widget after a failed attachment. Optional for legacy
+  backends; backends with owned native resources must implement :dispose!."
+  [widget]
+  (when-let [dispose! (:dispose! @impl)] (dispose! widget))
+  nil)
+
+(defn run-lifecycle
+  "Explicit root ownership seam. :run-lifecycle receives opts and callbacks:
+    :mount!   (fn [container tag]) mounts the root and returns
+               {:window :tag :inst :root-fn}, :inst being the root as mounted
+               (a reload! replaces it).
+    :unmount! (fn []) disposes the latest root (including reloads) before native
+               teardown, on the GUI thread. Idempotent.
+    :abandon! (fn []) detaches subscriptions without native calls, for unexpected
+               native destruction. The backend must release its remaining arena.
+  The backend must invoke unmount!/abandon! in finally, including on failures.
+  Legacy :run backends keep their original contract and run's finalizer at least
+  detaches subscriptions after their loop exits. No private core state is exposed."
+  [opts lifecycle]
+  (if-let [f (:run-lifecycle @impl)]
+    (f opts lifecycle)
+    (run opts (:mount! lifecycle))))

@@ -38,8 +38,8 @@
 ;; Headless, with no loop running, re-renders stay synchronous exactly as before.
 
 ;; The running app's mounted root, recorded by run so reload! can re-render it in
-;; the same window (REPL hot-reload). {:window w :tag :window :inst root-atom
-;; :root-fn f}, or nil when no app is running.
+;; the same window (REPL hot-reload). Holds the current run's root-state atom,
+;; or nil when no app is running. Backend lifecycle callbacks own that atom.
 (defonce ^:private live-root (atom nil))
 
 (defn on-gui
@@ -324,21 +324,25 @@
       (let [widget (b/create! tag props)
             new {:type :native :tag tag :props props :widget widget :children []}
             replacing? (and inst (= (:type inst) :native))]
-        (if replacing?
-          (do
-            ;; native -> native of another tag: the old widget goes, and the
-            ;; component watchers in its subtree must go with it, or they keep
-            ;; rendering into a widget that is no longer in the tree.
-            (dispose-tree! inst-atom)
-            (b/replace-child! parent-tag parent-widget (:widget inst) widget))
-          (do
-            ;; comp -> native: the component owned no widget, but its expanded
-            ;; children are parented here and its watchers are live. Tear both
-            ;; down or the old subtree keeps rendering beside the new widget.
-            (when inst
+        (try
+          (if replacing?
+            (do
+              ;; native -> native of another tag: the old widget goes, and the
+              ;; component watchers in its subtree must go with it, or they keep
+              ;; rendering into a widget that is no longer in the tree.
               (dispose-tree! inst-atom)
-              (destroy-inst! inst-atom parent-widget parent-tag))
-            (b/append-child! parent-tag parent-widget widget)))
+              (b/replace-child! parent-tag parent-widget (:widget inst) widget))
+            (do
+              ;; comp -> native: the component owned no widget, but its expanded
+              ;; children are parented here and its watchers are live. Tear both
+              ;; down or the old subtree keeps rendering beside the new widget.
+              (when inst
+                (dispose-tree! inst-atom)
+                (destroy-inst! inst-atom parent-widget parent-tag))
+              (b/append-child! parent-tag parent-widget widget)))
+          (catch Throwable error
+            (b/dispose-widget! widget)
+            (throw error)))
         (reset! inst-atom new)))
     (reconcile-children! (:widget @inst-atom) tag children inst-atom)))
 
@@ -456,11 +460,20 @@
   "Remove a mounted root (the atom returned by mount) from its container, tearing
   down its reactive subscriptions first so nothing renders into the removed tree.
   The root atom is cleared even when the backend fails to remove the widget, so
-  a retry afterwards is a no-op."
+  a retry or abandon! afterwards is a no-op."
   [root-inst-atom container-widget container-tag]
   (dispose-tree! root-inst-atom)
   (try (destroy-inst! root-inst-atom container-widget container-tag)
        (finally (reset! root-inst-atom nil))))
+
+(defn abandon!
+  "Detach a mounted root's subscriptions without touching native widgets.
+  The owner must release its native arena afterward. Idempotent; for backends
+  managing independent roots when native destruction or a callback fails."
+  [root-inst-atom]
+  (dispose-tree! root-inst-atom)
+  (reset! root-inst-atom nil)
+  nil)
 
 (defn run
   "Run an application with the installed backend. The backend creates a top-level
@@ -475,15 +488,48 @@
     :auto-quit-ms  if set, quit the loop after this many milliseconds
                    (smoke/automated tests).
 
+  A backend that implements :run-lifecycle receives explicit :mount!, :unmount!
+  and :abandon! callbacks and owns the root's lifetime (see
+  glimmer.backend/run-lifecycle); a legacy :run backend keeps its mount-root!
+  contract. Either way the root's subscriptions are detached when run returns.
+  A later run replaces the root that reload! targets once its own root has
+  mounted; one the backend rejects before that leaves the live run in place.
+
   Requiring a backend namespace installs it — see glimmer-gtk.core for GTK4."
   [root-fn & {:as opts}]
-  (b/run (or opts {})
-         (fn [window tag]
-           ;; mount as a component so the whole tree is reactive, and record the
-           ;; live root so reload! can re-render it in this same window.
-           (reset! live-root {:window window :tag tag
-                              :inst (mount window tag [root-fn])
-                              :root-fn root-fn}))))
+  (let [state (atom nil)
+        dispose! (fn [native?]
+                   ;; :inst is nil while reload! replaces the root and after a
+                   ;; replacement root threw: the run still owns its window then.
+                   (when-let [{:keys [window tag inst]} @state]
+                     (reset! state nil)
+                     (when inst
+                       (if native?
+                         (unmount! inst window tag)
+                         (do (dispose-tree! inst) (reset! inst nil))))))
+        lifecycle {:mount! (fn [window tag]
+                             (when @state (dispose! true))
+                             (reset! state {:window window :tag tag
+                                            :inst (mount window tag [root-fn])
+                                            :root-fn root-fn})
+                             ;; A later run takes over live-root once its root has
+                             ;; mounted, so a run the backend rejects before that
+                             ;; (Qt: a session is already active) leaves the live
+                             ;; run's reload! target in place. The finalizer below
+                             ;; releases only its own.
+                             (reset! live-root state)
+                             ;; What mount-root! returned before this seam;
+                             ;; legacy backends (glimmer-appkit) keep its :inst.
+                             @state)
+                   :unmount! #(dispose! true)
+                   :abandon! #(dispose! false)}]
+    (try
+      (b/run-lifecycle (or opts {}) lifecycle)
+      (finally
+        ;; Legacy backends may already have destroyed their native container.
+        ;; Qt unmounts explicitly, on its GUI thread, before closing the engine.
+        (dispose! false)
+        (compare-and-set! live-root state nil)))))
 
 (defn reload!
   "Re-mount the running app's root into its existing window, on the UI thread.
@@ -497,18 +543,29 @@
 
   Re-mounting rebuilds the component tree, so state held in a component's own let
   is reset. Keep state that should survive a reload in a top-level defonce reactive
-  cell (atom/cursor/reaction) that the components read — reagent-style. Unmounting
-  tears down the old tree's watchers, so those defonce cells keep exactly the live
-  tree's subscriptions across reloads. (Signal-handler callbacks from the old tree
-  are still retained; fine for a dev loop, not a full teardown.) No-op when no app
-  is running."
+  cell (atom/cursor/reaction) that the components read — reagent-style. The old
+  tree's subscriptions are detached before the new tree mounts, so those defonce
+  cells carry exactly the live tree's subscriptions across reloads. A reload
+  belongs to the run that was live when it was requested: one queued before that
+  run exits does not touch a later run. A new root that throws while mounting
+  leaves the window empty but still the run's, with the previous root fn in
+  place: reload! again, with a corrected fn or none, to fill it. No-op when no
+  app is running."
   ([] (reload! nil))
   ([new-root-fn]
-   (on-gui
-     (fn []
-       (if-let [{:keys [window tag inst] :as st} @live-root]
-         (let [f (or new-root-fn (:root-fn st))]
-           (unmount! inst window tag)
-           (reset! live-root (assoc st :inst (mount window tag [f]) :root-fn f)))
-         (println "glimmer.core/reload!: no running app to reload"))))
+   (if-let [state @live-root]
+     (on-gui
+       (fn []
+         (when-let [{:keys [window tag inst] :as st} @state]
+           (let [f (or new-root-fn (:root-fn st))]
+             ;; Only the instance leaves the state while the root is replaced:
+             ;; the run keeps its window, tag and previous root fn, so a new
+             ;; root that throws while mounting leaves an empty window a later
+             ;; reload! fills. The new instance and fn are published together
+             ;; once the mount has succeeded.
+             (swap! state assoc :inst nil)
+             (when inst (unmount! inst window tag))
+             (let [new-inst (mount window tag [f])]
+               (swap! state assoc :inst new-inst :root-fn f))))))
+     (println "glimmer.core/reload!: no running app to reload"))
    nil))
