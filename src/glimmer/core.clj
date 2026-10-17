@@ -174,8 +174,13 @@
 ;; --- instance tree -----------------------------------------------------------
 ;; Each rendered element has an atom holding its instance state:
 ;;   native: {:type :native :tag :button :props {} :widget <w> :children [atom...]}
-;;   comp:   {:type :comp :render-fn <fn> :children [atom]}  ; one child = expanded root
-;; A nil instance means nothing has been mounted at that position yet.
+;;   comp:   {:type :comp :render-fn <fn> :parent <atom> :children [atom]}  ; one child = expanded root
+;; A nil instance means nothing has been mounted at that position yet. A
+;; component's :parent is the instance whose child slot it fills, so a re-render
+;; that contributes a widget where there was none can find the slot order of the
+;; container it appends to and place the widget among its siblings. While a
+;; native instance's children pass runs it also carries :fresh-slots, the slot
+;; atoms that pass created.
 
 (declare reconcile-el!)
 
@@ -223,6 +228,18 @@
       (doseq [child (:children inst)]
         (dispose-tree! child)))))
 
+(defn- with-fresh-slots
+  "Run `render!`, a parent's children pass, with `fresh` — the slot atoms the
+  pass created — recorded on the parent instance for its duration. A widget
+  appended for a fresh slot needs no placement: in a positional pass the slots
+  after it are fresh too and hold no widgets yet, and a keyed pass that creates
+  a slot ahead of reused ones reorders afterwards. Skipping them keeps a mount
+  linear in the number of children instead of scanning the slots after each."
+  [inst-atom fresh render!]
+  (swap! inst-atom assoc :fresh-slots fresh)
+  (try (render!)
+       (finally (swap! inst-atom dissoc :fresh-slots))))
+
 (defn- reconcile-positional-children!
   "Positionally reconcile `new-children` (a flattened vector of hiccup) against the
   instance's existing children, reusing widgets where the element shape matches at
@@ -240,8 +257,10 @@
     ;; Publish slots before rendering: a failed sibling must still be disposable.
     (swap! inst-atom assoc :children reused)
     ;; reconcile each child into its (possibly new) atom
-    (doseq [i (range n)]
-      (reconcile-el! parent-widget parent-tag (nth new-children i) (nth reused i)))))
+    (with-fresh-slots inst-atom (set (subvec reused (min n (count old))))
+      (fn []
+        (doseq [i (range n)]
+          (reconcile-el! parent-widget parent-tag (nth new-children i) (nth reused i) inst-atom))))))
 
 (defn- reorder-keyed-widgets!
   "Force `child-atoms`' widgets into the given order within the parent, moving
@@ -295,10 +314,12 @@
                                (atom nil))))]
       ;; Publish slots before rendering: a failed sibling must still be disposable.
       (swap! inst-atom assoc :children child-atoms)
-      (doseq [i (range (count child-atoms))]
-        (let [a (nth child-atoms i)]
-          (reconcile-el! parent-widget parent-tag (nth new-children i) a)
-          (swap! a assoc :key (nth new-keys i))))
+      (with-fresh-slots inst-atom (set (remove (set old) child-atoms))
+        (fn []
+          (doseq [i (range (count child-atoms))]
+            (let [a (nth child-atoms i)]
+              (reconcile-el! parent-widget parent-tag (nth new-children i) a inst-atom)
+              (swap! a assoc :key (nth new-keys i))))))
       (when reorder?
         (reorder-keyed-widgets! parent-widget parent-tag child-atoms)))))
 
@@ -314,8 +335,39 @@
       (reconcile-keyed-children! parent-widget parent-tag flat inst-atom)
       (reconcile-positional-children! parent-widget parent-tag flat inst-atom))))
 
+(defn- container-slot
+  "The slot `inst-atom` fills in its nearest native ancestor, as [native-inst
+  slot]: `parent-inst` is the instance `inst-atom` is a child of, and the walk
+  follows :parent links up through the components between them, since a
+  component fills its own slot with whatever its expanded child contributes.
+  nil for the root, whose container is not an instance."
+  [inst-atom parent-inst]
+  (loop [slot inst-atom parent parent-inst]
+    (when parent
+      (if (= :native (:type @parent))
+        [parent slot]
+        (recur parent (:parent @parent))))))
+
+(defn- place-appended-widget!
+  "Move `widget`, just appended to `parent-widget` on behalf of `inst-atom`, to
+  where its slot order puts it: after the widget of the nearest preceding slot
+  that contributes one, or first when none does. A slot the running children
+  pass created is skipped without a look at its siblings (see with-fresh-slots),
+  so a mount appends in order and moves nothing; otherwise nothing moves unless
+  a later slot contributes a widget — the case when a component that rendered
+  nil re-renders to an element, or a slot turns from a component into a native
+  element. Backends without :reorder-child! keep the appended order."
+  [parent-widget parent-tag widget inst-atom parent-inst]
+  (when-let [[native slot] (container-slot inst-atom parent-inst)]
+    (when-not (contains? (:fresh-slots @native) slot)
+      (let [slots (:children @native)
+            idx (first (keep-indexed (fn [i a] (when (identical? a slot) i)) slots))]
+        (when (and idx (some inst-widget (subvec slots (inc idx))))
+          (b/reorder-child! parent-tag parent-widget widget
+                            (some inst-widget (reverse (subvec slots 0 idx)))))))))
+
 (defn- reconcile-native!
-  [parent-widget parent-tag v inst-atom]
+  [parent-widget parent-tag v inst-atom parent-inst]
   (let [{:keys [tag props children]} (parse-native v)
         inst @inst-atom]
     (if (and inst (= (:type inst) :native) (= (:tag inst) tag))
@@ -343,7 +395,11 @@
           (catch Throwable error
             (b/dispose-widget! widget)
             (throw error)))
-        (reset! inst-atom new)))
+        (reset! inst-atom new)
+        ;; A replacement keeps its position; an appended widget sits behind the
+        ;; siblings that already had theirs when this slot gained one later.
+        (when-not replacing?
+          (place-appended-widget! parent-widget parent-tag widget inst-atom parent-inst))))
     (reconcile-children! (:widget @inst-atom) tag children inst-atom)))
 
 (defn rerender-thunk
@@ -362,8 +418,9 @@
   Each component renders exactly once per render: a Form-2 component's outer fn
   runs only on mount (its returned render fn is cached); a Form-1 component's fn
   is re-applied each render. We classify with fn?, not ifn? — a hiccup vector is
-  callable, so ifn? would treat every Form-1 result as a Form-2 render fn."
-  [parent-widget parent-tag v inst-atom]
+  callable, so ifn? would treat every Form-1 result as a Form-2 render fn.
+  `parent-inst` is the instance whose child slot this component fills."
+  [parent-widget parent-tag v inst-atom parent-inst]
   (let [f (first v)
         ;; strip a leading {:key k} so it never reaches the component fn — mirrors
         ;; parse-native. A key-only map drops entirely; a map mixing :key with real
@@ -396,7 +453,8 @@
     ;; re-renders with the initial v from mount, overwriting parent updates.
     ;; A different component fn at this slot must not keep the previous one's
     ;; Form-2 render fn, or the next re-render would draw the old component.
-    (swap! inst-atom (fn [c] (cond-> (assoc c :v v :type :comp)
+    ;; The parent link lets the expanded child find its slot when it appears.
+    (swap! inst-atom (fn [c] (cond-> (assoc c :v v :type :comp :parent parent-inst)
                                (nil? cached-render-fn) (dissoc :render-fn))))
     (let [child-atom (first (:children @inst-atom))
           ;; subscribe: any reactive read during render re-runs just this component.
@@ -405,8 +463,10 @@
           watcher (or (:watcher @inst-atom)
                       ;; Disposal detaches the scope and fences already-queued renders.
                       (let [disposed (atom false)
+                            ;; A re-render fills the slot the component was mounted in.
+                            rerender (fn [pw pt v ia] (reconcile-comp! pw pt v ia (:parent @ia)))
                             w (make-rerender-watcher
-                                (rerender-thunk reconcile-comp! parent-widget parent-tag inst-atom)
+                                (rerender-thunk rerender parent-widget parent-tag inst-atom)
                                 b/loop-running? b/schedule disposed)]
                         (swap! inst-atom assoc :watcher w :disposed disposed
                                :subscription-scope (r/watch-scope w)) w))
@@ -419,24 +479,26 @@
                        (if (fn? result)
                          (do (swap! inst-atom assoc :type :comp :render-fn result) (result))
                          result))))]                          ; Form-1: hiccup, used directly
-      (reconcile-el! parent-widget parent-tag hiccup child-atom))))
+      (reconcile-el! parent-widget parent-tag hiccup child-atom inst-atom))))
 
 (defn- reconcile-el!
-  "Reconcile one hiccup element (native, component, or primitive) into inst-atom."
-  [parent-widget parent-tag el inst-atom]
+  "Reconcile one hiccup element (native, component, or primitive) into inst-atom,
+  a child slot of `parent-inst` (nil for the root, whose container is not an
+  instance)."
+  [parent-widget parent-tag el inst-atom parent-inst]
   (cond
     (nil? el) (do (dispose-tree! inst-atom)
                   (destroy-inst! inst-atom parent-widget parent-tag)
                   (reset! inst-atom nil))
-    (string? el) (reconcile-native! parent-widget parent-tag (b/text->element el) inst-atom)
-    (number? el) (reconcile-native! parent-widget parent-tag (b/text->element (str el)) inst-atom)
+    (string? el) (reconcile-native! parent-widget parent-tag (b/text->element el) inst-atom parent-inst)
+    (number? el) (reconcile-native! parent-widget parent-tag (b/text->element (str el)) inst-atom parent-inst)
     (vector? el)
     (let [head (first el)]
       (cond
-        (keyword? head) (reconcile-native! parent-widget parent-tag el inst-atom)
-        (fn? head)      (reconcile-comp! parent-widget parent-tag el inst-atom)
+        (keyword? head) (reconcile-native! parent-widget parent-tag el inst-atom parent-inst)
+        (fn? head)      (reconcile-comp! parent-widget parent-tag el inst-atom parent-inst)
         :else (throw (ex-info (str "unsupported hiccup element: " (pr-str el)) {:el el}))))
-    :else (reconcile-native! parent-widget parent-tag (b/text->element (pr-str el)) inst-atom)))
+    :else (reconcile-native! parent-widget parent-tag (b/text->element (pr-str el)) inst-atom parent-inst)))
 
 ;; --- public API --------------------------------------------------------------
 (defn mount
@@ -448,7 +510,7 @@
   [container-widget container-tag hiccup]
   (let [root (atom nil)]
     (try
-      (reconcile-el! container-widget container-tag hiccup root)
+      (reconcile-el! container-widget container-tag hiccup root nil)
       root
       (catch Throwable error
         (dispose-tree! root)
