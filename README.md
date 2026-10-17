@@ -55,6 +55,16 @@ Components are invoked as `[my-component arg ...]`. They produce no widget of
 their own — they expand to native elements — but each one is its own reactive
 unit: a cell it reads during render re-runs *only that component*.
 
+A component's subscriptions are exactly the cells its latest render read: a cell
+it stops reading is dropped, and unmounting or replacing it detaches them at
+once rather than on each cell's next change. A `mount` that fails part-way is
+unwound: the subtree created so far is disposed and its subscriptions detached
+before the error propagates. A re-render that throws is not unwound: the cells
+it read before throwing stay subscribed, so the next change to one of them
+retries the render. A different component fn at the same slot reuses the
+expanded subtree in place and discards only the previous Form-2 render fn. A
+component that renders `nil` removes whatever it rendered before.
+
 ## Reactive state
 
 All in `glimmer.ratom`, all read with `@`:

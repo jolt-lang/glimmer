@@ -136,6 +136,21 @@
 (defn- reaction? [x] (instance? Reaction x))
 (defn- cursor? [x] (instance? Cursor x))
 
+(def ^:dynamic *watch-scope*
+  "Optional explicit subscription owner bound by a component renderer." nil)
+
+(defn watch-scope [watcher]
+  {:watcher watcher :cells (clojure.core/atom #{})})
+
+(defn clear-subscriptions!
+  "Immediately detach all subscriptions owned by this scope. Idempotent."
+  [scope]
+  (when scope
+    (let [cells (host-deref (:cells scope))]
+      (host-reset! (:cells scope) #{})
+      (doseq [cell cells] (-remove-watch! cell (:watcher scope)))))
+  nil)
+
 ;; Bound by `capture` to a fn of one cell, called for every reactive cell
 ;; dereffed. Independent of *current-watcher*: capture only observes which cells
 ;; were read, it subscribes nothing.
@@ -143,6 +158,8 @@
 
 (defn- track! [r]
   (when *current-watcher*
+    (when (and *watch-scope* (= *current-watcher* (:watcher *watch-scope*)))
+      (host-swap! (:cells *watch-scope*) clojure.core/conj r))
     (-add-watch! r *current-watcher*))
   (when *on-deref*
     (*on-deref* r)))
