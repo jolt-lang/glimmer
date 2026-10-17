@@ -18,7 +18,8 @@
   children are removed and new ones appended. Components are transparent — they
   produce no widget of their own, just expand to native elements — but each one
   binds glimmer.ratom/*current-watcher* around its render so any reactive cell it
-  derefs re-runs that component (and only that component) on change.
+  derefs re-runs that component (and only that component) on change. A widget a
+  slot gains after its siblings have theirs is moved to where the slot sits.
 
   This namespace is toolkit-independent. Everything native — what a widget is,
   how props are applied, how children are attached, what the event loop looks
@@ -175,7 +176,9 @@
 ;; Each rendered element has an atom holding its instance state:
 ;;   native: {:type :native :tag :button :props {} :widget <w> :children [atom...]}
 ;;   comp:   {:type :comp :render-fn <fn> :children [atom]}  ; one child = expanded root
-;; A nil instance means nothing has been mounted at that position yet.
+;; A nil instance means nothing has been mounted at that position yet. A native
+;; instance also keeps its slots' order state (see widget placement below), and
+;; a keyed slot its :key and the :index the last keyed pass put it at.
 
 (declare reconcile-el!)
 
@@ -223,46 +226,341 @@
       (doseq [child (:children inst)]
         (dispose-tree! child)))))
 
+;; --- widget placement --------------------------------------------------------
+;; A slot can gain a widget after its siblings have theirs: a component that
+;; rendered nil renders an element, a slot turns from a component into an
+;; element, or a keyed row is created ahead of existing rows. The backend appends
+;; it last, so it is moved after the widget of the nearest preceding slot that
+;; has one, or first.
+;;
+;; Every slot has a sparse integer rank, increasing along the container's
+;; :children. The order state lives on the container's instance, which outlives
+;; its children's renders:
+;;   :ranks  {slot rank}, absent while ranks are implicit: (i+1)*stride for the
+;;           slot at index i, until a keyed pass first moves a reused slot or
+;;           creates one ahead of one. Mounts and tail appends write no ranks.
+;;   :tail   an upper bound on the highest rank holding a widget, -1 for none. A
+;;           gain at or above it is in order, since ranks are unique; losses may
+;;           leave it high, which costs a lookup.
+;;   :shown  (sorted-map rank slot) of the slots holding a widget, built on the
+;;           first late placement. Hidden slots' entries go stale; lookups skip
+;;           and drop them.
+;;   :unordered  set while the widgets may not follow the ranks: during a pass
+;;           with a move step, and after a failed render or move, until a pass
+;;           moves every widget.
+;;
+;; A pass renders each child with a context {:container :slot :index}, which a
+;; component's watcher keeps, so a nested component places into its outermost
+;; slot; the index is a hint. A slot the container no longer lists, dropped by a
+;; nested pass while it rendered, has no rank and gains no widget.
+
+(def ^:private stride
+  "The gap between spread-out ranks: about ten midpoint inserts use one up, and
+  the next keyed pass renumbers the container."
+  1024)
+
+(defn- slot-position
+  "The index of `slot` in the :children of the container map `cm`, or nil when it
+  is no longer listed. Tries the hint `i`, then the :index a keyed pass stamped on
+  the slot (a watcher's hint goes stale once its keyed row moves), then scans."
+  [cm slot i]
+  (let [cs (:children cm)]
+    (if (and i (identical? slot (get cs i)))
+      i
+      (let [j (:index @slot)]
+        (if (and j (identical? slot (get cs j)))
+          j
+          (let [k (.indexOf cs slot)] (when-not (neg? k) k)))))))
+
+(defn- slot-rank
+  "The rank of `slot` in the container map `cm`, or nil when it is no longer
+  listed. Explicit :ranks hold exactly the listed slots."
+  [cm slot i]
+  (if-let [ranks (:ranks cm)]
+    (get ranks slot)
+    (when-let [p (slot-position cm slot i)]
+      (* stride (inc p)))))
+
+(defn- tail-rank
+  "The rank of the last slot of `cs`, up to index `from`, that holds a widget, by
+  `ranks` or the implicit ones when nil; -1 when none does."
+  [cs ranks from]
+  (loop [i (or from -1)]
+    (cond (neg? i) -1
+          (inst-widget (nth cs i)) (if ranks (get ranks (nth cs i)) (* stride (inc i)))
+          :else (recur (dec i)))))
+
+(defn- entry-valid?
+  "Whether the index entry `r` -> `slot` still holds in the container map `cm`:
+  the slot has that rank and a widget. A slot is cleared as soon as its widget is
+  destroyed, so a removed widget never counts."
+  [cm r slot]
+  (and (if-let [ranks (:ranks cm)]
+         (= r (get ranks slot))
+         (identical? slot (get (:children cm) (dec (quot r stride)))))
+       (inst-widget slot)))
+
+(defn- shown-index
+  "The :shown index of the container map `cm`, built from its :children."
+  [cm]
+  (let [cs (:children cm) ranks (:ranks cm)]
+    (reduce (fn [shown i]
+              (let [s (nth cs i)]
+                (if (inst-widget s) (assoc shown (if ranks (get ranks s) (* stride (inc i))) s) shown)))
+            (sorted-map) (range (count cs)))))
+
+(defn- drop-entry
+  "`shown` without its entry at rank `r`, when that entry is `slot`'s."
+  [shown r slot]
+  (if (identical? slot (get shown r)) (dissoc shown r) shown))
+
+(defn- first-valid
+  "The first valid index entry of `entries`, and the stale ones before it, which
+  the caller drops: revealing every hidden row would otherwise rescan them all."
+  [cm entries]
+  (loop [es entries stale []]
+    (if-let [e (first es)]
+      (if (entry-valid? cm (key e) (val e))
+        [e stale]
+        (recur (next es) (conj stale e)))
+      [nil stale])))
+
+(defn- record-gain
+  "The container map `m` once `slot` gains a widget at rank `r` in order, or for
+  the pass's move step to place (`defer?`), which leaves it :unordered."
+  [m r slot defer?]
+  (let [m (assoc m :tail (max r (:tail m -1)))
+        m (if-let [shown (:shown m)] (assoc m :shown (assoc shown r slot)) m)]
+    (if defer? (assoc m :unordered true) m)))
+
+(defn- place-gained!
+  "Place `widget`, just appended for `slot` of the container `c` at rank `r`. A
+  gain in order, or deferred to the pass's move step, is only recorded. Otherwise
+  the widget moves after the nearest preceding slot's widget, or first, when a
+  later slot has one. Before the index is first built, the slots from the end are
+  checked, since losses leave :tail high. A failed move leaves `c` :unordered."
+  [c slot r defer? parent-tag parent-widget widget]
+  (let [cm @c]
+    (cond
+      (or (>= r (:tail cm -1)) defer?)
+      (swap! c record-gain r slot defer?)
+
+      (and (nil? (:shown cm))
+           (= r (tail-rank (:children cm) (:ranks cm) (dec (count (:children cm))))))
+      (swap! c #(assoc % :tail r))
+
+      :else
+      (let [built (or (:shown cm) (shown-index cm))
+            [prev stale-before] (first-valid cm (rsubseq built < r))
+            [later stale-after] (first-valid cm (subseq built > r))]
+        ;; With no widget after this one, r is now the highest rank holding one.
+        (swap! c (fn [m]
+                   (let [shown (reduce (fn [sh e] (drop-entry sh (key e) (val e)))
+                                       (or (:shown m) built)
+                                       (into stale-before stale-after))]
+                     (cond-> (assoc m :shown (assoc shown r slot))
+                       (nil? later) (assoc :tail r)))))
+        (when later
+          (try
+            (b/reorder-child! parent-tag parent-widget widget
+                              (when prev (inst-widget (val prev))))
+            (catch Throwable error
+              (swap! c #(assoc % :unordered true))
+              (throw error))))))))
+
+(defn- kept-mask
+  "Which slots of a reordering keyed pass keep their rank: the reused ones along
+  a longest increasing subsequence of their old indices (`old-index`, in new
+  order, nil when created). Only the others move, so moving one row costs one
+  move; a longest contiguous run would move half the rows for one crossing it."
+  [old-index]
+  (let [n (count old-index)
+        ;; tails[k]: the position whose old index is the smallest that ends an
+        ;; increasing run of length k+1. links[j]: the position before j on its run.
+        [tails links]
+        (loop [j 0 tails [] links []]
+          (if (= j n)
+            [tails links]
+            (if-let [oi (nth old-index j)]
+              (let [k (loop [lo 0 hi (count tails)]
+                        (if (< lo hi)
+                          (let [mid (quot (+ lo hi) 2)]
+                            (if (< (nth old-index (nth tails mid)) oi)
+                              (recur (inc mid) hi)
+                              (recur lo mid)))
+                          lo))]
+                (recur (inc j) (assoc tails k j)
+                       (conj links (when (pos? k) (nth tails (dec k))))))
+              (recur (inc j) tails (conj links nil)))))]
+    (loop [j (peek tails) mask (vec (repeat n false))]
+      (if j (recur (nth links j) (assoc mask j true)) mask))))
+
+(defn- spread-ranks
+  "[index rank] pairs for the slots of a keyed pass that `kept` leaves out. A run
+  of them is spread evenly over the gap between the ranks of its kept neighbours
+  (`kept-rank`, by index), down to 0 before the first and at the stride after the
+  last; nil when a gap has too few free integers."
+  [n kept kept-rank]
+  (loop [j 0 lo-j nil out (transient [])]
+    (cond
+      (= j n) (persistent! out)
+      (nth kept j) (recur (inc j) j out)
+      :else
+      (let [end (loop [b j] (if (and (< b n) (not (nth kept b))) (recur (inc b)) b))
+            run (- end j)
+            lo (if lo-j (kept-rank lo-j) 0)
+            hi (when (< end n) (kept-rank end))]
+        (if (and hi (<= (- hi lo) run))
+          nil
+          (recur end lo-j
+                 (reduce (fn [out t]
+                           (conj! out [(+ j t)
+                                       (if hi
+                                         (+ lo (quot (* (- hi lo) (inc t)) (inc run)))
+                                         (+ lo (* stride (inc t))))]))
+                         out (range run))))))))
+
+(defn- keyed-order
+  "The container map `m` once a keyed pass publishes `child-atoms`. `old-index`
+  holds each slot's old index (nil when created), `kept` whether it keeps its
+  rank, and `destroyed` the [old-index slot] pairs the pass removed. The others
+  are spread between their kept neighbours, which makes ranks explicit; when a
+  gap has run out, ranks go back to implicit along the new order, and the index
+  is dropped for the next late placement to rebuild. A `reorder?` leaves the
+  container :unordered until the pass's move step."
+  [m child-atoms old-index kept reorder? destroyed]
+  (let [old-ranks (:ranks m)
+        n (count child-atoms)
+        old-rank (fn [oi slot] (if old-ranks (get old-ranks slot) (* stride (inc oi))))
+        last-reused (loop [j (dec n)]
+                      (cond (neg? j) nil
+                            (nth old-index j) j
+                            :else (recur (dec j))))
+        ;; With implicit ranks and no reorder, the reused slots come first in
+        ;; their old order, so their ranks hold unless a destroy shifted them,
+        ;; which takes the last one off its old index.
+        implicit? (and (nil? old-ranks) (not reorder?))
+        placed (when-not implicit?
+                 (spread-ranks n kept #(old-rank (nth old-index %) (nth child-atoms %))))
+        ranks (when placed
+                (reduce (fn [rs [j rk]] (assoc rs (nth child-atoms j) rk))
+                        (if old-ranks
+                          (reduce (fn [rs [_ slot]] (dissoc rs slot)) old-ranks destroyed)
+                          (persistent!
+                            (reduce (fn [rs j]
+                                      (if (nth kept j)
+                                        (assoc! rs (nth child-atoms j) (* stride (inc (nth old-index j))))
+                                        rs))
+                                    (transient {}) (range n))))
+                        placed))
+        keep-index? (if implicit?
+                      (or (nil? last-reused) (= last-reused (nth old-index last-reused)))
+                      placed)
+        shown (when-let [sh (and keep-index? (:shown m))]
+                ;; a moved slot that has a widget keeps an entry, at its new rank
+                (reduce (fn [sh [j rk]]
+                          (let [slot (nth child-atoms j)]
+                            (if-let [oi (nth old-index j)]
+                              (cond-> (drop-entry sh (old-rank oi slot) slot)
+                                (inst-widget slot) (assoc rk slot))
+                              sh)))
+                        (reduce (fn [sh [oi slot]] (drop-entry sh (old-rank oi slot) slot)) sh destroyed)
+                        placed))]
+    (assoc m :children child-atoms :ranks ranks :shown shown
+             :tail (tail-rank child-atoms ranks last-reused)
+             :unordered (or reorder? (:unordered m)))))
+
+(defn- positional-order
+  "The container map `m` once a positional pass publishes `reused`. Slots keep
+  their index, so it drops explicit ranks a keyed pass left, and the index keyed
+  by them: an appended slot's implicit rank could repeat one of them. Truncation
+  clamps :tail and drops the removed slots' entries."
+  [m reused]
+  (let [n (count reused)
+        old-n (count (:children m))
+        m (assoc m :children reused)]
+    (cond
+      (:ranks m) (-> m (dissoc :ranks :shown) (assoc :tail (tail-rank reused nil (dec (min n old-n)))))
+      (< n old-n) (let [top (* stride n)]
+                    (cond-> (assoc m :tail (if (zero? n) -1 (min (:tail m -1) top)))
+                      (:shown m) (update :shown #(reduce dissoc % (map key (subseq % > top))))))
+      :else m)))
+
+(defn- move-widgets!
+  "A pass's move step, once its children have rendered: move each widget after
+  the one before it, or first, except the anchors, kept slots whose widget is the
+  one `before` holds for them (by index into `published`). With no `before`, or
+  once a nested pass replaced the children, every widget moves; a pass replacing
+  them during the step stops it. A completed step clears :unordered."
+  [parent-widget parent-tag c published before]
+  (let [cs (:children @c)
+        before (when (identical? cs published) before)
+        n (count cs)]
+    (loop [j 0 prev nil]
+      (cond
+        (not (identical? cs (:children @c))) nil
+        (= j n) (swap! c #(dissoc % :unordered))
+        :else
+        (if-let [w (inst-widget (nth cs j))]
+          (do (when-not (and before (identical? w (nth before j)))
+                (b/reorder-child! parent-tag parent-widget w prev))
+              (recur (inc j) w))
+          (recur (inc j) prev))))))
+
+(defn- render-slots!
+  "Run (render! i slot) for each slot of `published`, the children a pass
+  published on the container `c`. A render can re-render the container's owner
+  inline, running a nested pass on `c` that drops slots: those are skipped, and
+  one dropped while it rendered is disposed and cleared, even when the render
+  throws, or a component recreated in it would keep a watcher nothing reaches."
+  [c published render!]
+  (when (seq published) ; every leaf runs an empty pass: no try for it
+    (let [at (volatile! -1)
+          listed? (fn [i] (some? (slot-position @c (nth published i) i)))
+          settle! (fn [i] (when-not (listed? i)
+                            (dispose-tree! (nth published i))
+                            (reset! (nth published i) nil)))]
+      (try
+        (loop [i 0 current? true]
+          (when (< i (count published))
+            (if (or current? (listed? i))
+              (do (vreset! at i)
+                  (render! i (nth published i))
+                  (let [current? (identical? (:children @c) published)]
+                    (when-not current? (settle! i))
+                    (recur (inc i) current?)))
+              (recur (inc i) false))))
+        (catch Throwable error
+          (when-not (neg? @at) (settle! @at))
+          (throw error))))))
+
+;; --- children passes ---------------------------------------------------------
 (defn- reconcile-positional-children!
   "Positionally reconcile `new-children` (a flattened vector of hiccup) against the
   instance's existing children, reusing widgets where the element shape matches at
   a position. The default path when children are not uniformly keyed."
   [parent-widget parent-tag new-children inst-atom]
-  (let [old (:children @inst-atom)
+  (let [cm @inst-atom
+        old (:children cm)
+        unordered? (:unordered cm)
         n (count new-children)
         ;; reuse the child atom at each position when it exists; else a fresh one
         reused (vec (for [i (range n)]
                       (if (< i (count old)) (nth old i) (atom nil))))]
-    ;; remove widgets for children that no longer exist
+    ;; remove widgets for children that no longer exist, clearing their slots
     (doseq [i (range n (count old))]
       (dispose-tree! (nth old i))
-      (destroy-inst! (nth old i) parent-widget parent-tag))
+      (destroy-inst! (nth old i) parent-widget parent-tag)
+      (reset! (nth old i) nil))
     ;; Publish slots before rendering: a failed sibling must still be disposable.
-    (swap! inst-atom assoc :children reused)
+    (swap! inst-atom #(positional-order % reused))
     ;; reconcile each child into its (possibly new) atom
-    (doseq [i (range n)]
-      (reconcile-el! parent-widget parent-tag (nth new-children i) (nth reused i)))))
-
-(defn- reorder-keyed-widgets!
-  "Force `child-atoms`' widgets into the given order within the parent, moving
-  each widget to sit after the previous one (the first goes to position 0).
-  Called only when keyed-plan says a reorder is needed. Repositioning does not
-  recreate widgets, so signal handlers and the instance atoms stay intact. A
-  keyed component that rendered nil contributes no widget, so its slot is
-  skipped and the next present widget goes after the nearest present one
-  before it, never after a nil handle. A no-op for backends without ordered
-  containers."
-  [parent-widget parent-tag child-atoms]
-  ;; resolve each child to its contributed widget — a keyed child may be a
-  ;; component, whose widget lives one level down on its expanded child, or
-  ;; nothing at all when the component rendered nil.
-  (let [widgets (vec (keep inst-widget child-atoms))
-        n (count widgets)]
-    (when (pos? n)
-      (doseq [i (range n)]
-        (let [w (nth widgets i)
-              prev (when (pos? i) (nth widgets (dec i)))]
-          (b/reorder-child! parent-tag parent-widget w prev))))))
+    (render-slots! inst-atom reused
+                   (fn [i a]
+                     (reconcile-el! parent-widget parent-tag (nth new-children i) a
+                                    {:container inst-atom :slot a :index i})))
+    (when unordered?
+      (move-widgets! parent-widget parent-tag inst-atom reused nil))))
 
 (defn- reconcile-keyed-children!
   "Reconcile uniformly-keyed `new-children` (a flattened vector of hiccup, each
@@ -270,11 +568,15 @@
   reuse/create/reorder plan from keyed-plan, destroys removed children, reuses
   surviving atoms by key, creates fresh atoms for new keys, re-applies each
   child's hiccup into its atom, and fixes widget order when the plan requires it.
-  Stores the child's :key on its instance so the next render can read old keys
-  back — that is how a row's widget and signal handlers follow the item across
-  add/remove/reorder instead of a stale position."
+  Stores the child's :key and :index on its instance so the next render can read
+  old keys back — that is how a row's widget and signal handlers follow the item
+  across add/remove/reorder instead of a stale position. Widgets gained during a
+  pass that moves any defer to its move step; a render error skips that step and
+  leaves the container :unordered."
   [parent-widget parent-tag new-children inst-atom]
-  (let [old (:children @inst-atom)
+  (let [cm @inst-atom
+        old (:children cm)
+        unordered? (:unordered cm)
         ;; raw old keys keep nils on purpose: a nil-keyed legacy child (mounted
         ;; before this parent became keyed) is absent from new-set, so keyed-plan
         ;; destroys it rather than orphaning its widget in the container.
@@ -288,19 +590,28 @@
         old-by-key (into {} (keep (fn [a] (when-let [k (:key @a)] [k a])) old))]
     (doseq [i destroy]
       (dispose-tree! (nth old i))
-      (destroy-inst! (nth old i) parent-widget parent-tag))
+      (destroy-inst! (nth old i) parent-widget parent-tag)
+      (reset! (nth old i) nil))
     (let [child-atoms (vec (for [slot slots]
                              (if (= :reuse (:kind slot))
                                (get old-by-key (:key slot))
-                               (atom nil))))]
+                               (atom nil))))
+          old-index (mapv :old-index slots)
+          kept (if reorder? (kept-mask old-index) (mapv some? old-index))
+          ;; each kept slot's widget before the pass, to tell the ones still in place
+          before (when (and reorder? (not unordered?))
+                   (mapv (fn [a k?] (when k? (inst-widget a))) child-atoms kept))
+          moves? (or reorder? unordered?)]
       ;; Publish slots before rendering: a failed sibling must still be disposable.
-      (swap! inst-atom assoc :children child-atoms)
-      (doseq [i (range (count child-atoms))]
-        (let [a (nth child-atoms i)]
-          (reconcile-el! parent-widget parent-tag (nth new-children i) a)
-          (swap! a assoc :key (nth new-keys i))))
-      (when reorder?
-        (reorder-keyed-widgets! parent-widget parent-tag child-atoms)))))
+      (let [destroyed (mapv (fn [i] [i (nth old i)]) destroy)]
+        (swap! inst-atom #(keyed-order % child-atoms old-index kept reorder? destroyed)))
+      (render-slots! inst-atom child-atoms
+                     (fn [i a]
+                       (reconcile-el! parent-widget parent-tag (nth new-children i) a
+                                      {:container inst-atom :slot a :index i :defer moves?})
+                       (let [k (nth new-keys i)] (swap! a #(assoc % :key k :index i)))))
+      (when moves?
+        (move-widgets! parent-widget parent-tag inst-atom child-atoms before)))))
 
 (defn- reconcile-children!
   "Reconcile `new-children` (hiccup) against the instance's existing children.
@@ -315,12 +626,23 @@
       (reconcile-positional-children! parent-widget parent-tag flat inst-atom))))
 
 (defn- reconcile-native!
-  [parent-widget parent-tag v inst-atom]
+  [parent-widget parent-tag v inst-atom ctx]
   (let [{:keys [tag props children]} (parse-native v)
-        inst @inst-atom]
-    (if (and inst (= (:type inst) :native) (= (:tag inst) tag))
+        inst @inst-atom
+        reuse? (and inst (= (:type inst) :native) (= (:tag inst) tag))
+        c (when-not reuse? (:container ctx)) ; no container at the root
+        cm (when c @c)
+        rank (when c (slot-rank cm (:slot ctx) (:index ctx)))]
+    (cond
+      reuse?
       (do (b/apply-props! tag (:widget inst) props)
-          (swap! inst-atom assoc :props props))
+          (swap! inst-atom assoc :props props)
+          (reconcile-children! (:widget inst) tag children inst-atom))
+
+      ;; a nested pass dropped the slot while this render was under way
+      (and c (nil? rank)) nil
+
+      :else
       (let [widget (b/create! tag props)
             new {:type :native :tag tag :props props :widget widget :children []}
             replacing? (and inst (= (:type inst) :native))]
@@ -336,15 +658,26 @@
               ;; comp -> native: the component owned no widget, but its expanded
               ;; children are parented here and its watchers are live. Tear both
               ;; down or the old subtree keeps rendering beside the new widget.
+              ;; Clear the slot first, keeping its key, so a failed append
+              ;; leaves it holding no removed widget.
               (when inst
                 (dispose-tree! inst-atom)
-                (destroy-inst! inst-atom parent-widget parent-tag))
+                (destroy-inst! inst-atom parent-widget parent-tag)
+                (reset! inst-atom (not-empty (select-keys inst [:key :index]))))
               (b/append-child! parent-tag parent-widget widget)))
           (catch Throwable error
             (b/dispose-widget! widget)
             (throw error)))
-        (reset! inst-atom new)))
-    (reconcile-children! (:widget @inst-atom) tag children inst-atom)))
+        (reset! inst-atom new)
+        ;; The append is the only way a slot gains a widget. A gain in order, as
+        ;; every one of a mount is, writes over the map read for its rank unless
+        ;; the container has changed since; place-gained! rereads it.
+        (when (and rank (not replacing?))
+          (let [slot (:slot ctx) defer? (:defer ctx)]
+            (when-not (and (or defer? (>= rank (:tail cm -1)))
+                           (compare-and-set! c cm (record-gain cm rank slot defer?)))
+              (place-gained! c slot rank defer? parent-tag parent-widget widget))))
+        (reconcile-children! widget tag children inst-atom)))))
 
 (defn rerender-thunk
   "The zero-arg closure a component's watcher runs to re-render it: re-reconciles
@@ -363,7 +696,7 @@
   runs only on mount (its returned render fn is cached); a Form-1 component's fn
   is re-applied each render. We classify with fn?, not ifn? — a hiccup vector is
   callable, so ifn? would treat every Form-1 result as a Form-2 render fn."
-  [parent-widget parent-tag v inst-atom]
+  [parent-widget parent-tag v inst-atom ctx]
   (let [f (first v)
         ;; strip a leading {:key k} so it never reaches the component fn — mirrors
         ;; parse-native. A key-only map drops entirely; a map mixing :key with real
@@ -404,9 +737,13 @@
           ;; a fresh closure would grow each cell's watch set on every re-render.
           watcher (or (:watcher @inst-atom)
                       ;; Disposal detaches the scope and fences already-queued renders.
+                      ;; The watcher places into the slot it was created in; it
+                      ;; renders outside any pass, so it never defers to a move step.
                       (let [disposed (atom false)
+                            ctx (dissoc ctx :defer)
                             w (make-rerender-watcher
-                                (rerender-thunk reconcile-comp! parent-widget parent-tag inst-atom)
+                                (rerender-thunk #(reconcile-comp! %1 %2 %3 %4 ctx)
+                                                parent-widget parent-tag inst-atom)
                                 b/loop-running? b/schedule disposed)]
                         (swap! inst-atom assoc :watcher w :disposed disposed
                                :subscription-scope (r/watch-scope w)) w))
@@ -419,24 +756,26 @@
                        (if (fn? result)
                          (do (swap! inst-atom assoc :type :comp :render-fn result) (result))
                          result))))]                          ; Form-1: hiccup, used directly
-      (reconcile-el! parent-widget parent-tag hiccup child-atom))))
+      (reconcile-el! parent-widget parent-tag hiccup child-atom ctx))))
 
 (defn- reconcile-el!
-  "Reconcile one hiccup element (native, component, or primitive) into inst-atom."
-  [parent-widget parent-tag el inst-atom]
+  "Reconcile one hiccup element (native, component, or primitive) into inst-atom.
+  `ctx` places a widget the element gains among its container's other slots; nil
+  at the root."
+  [parent-widget parent-tag el inst-atom ctx]
   (cond
     (nil? el) (do (dispose-tree! inst-atom)
                   (destroy-inst! inst-atom parent-widget parent-tag)
                   (reset! inst-atom nil))
-    (string? el) (reconcile-native! parent-widget parent-tag (b/text->element el) inst-atom)
-    (number? el) (reconcile-native! parent-widget parent-tag (b/text->element (str el)) inst-atom)
+    (string? el) (reconcile-native! parent-widget parent-tag (b/text->element el) inst-atom ctx)
+    (number? el) (reconcile-native! parent-widget parent-tag (b/text->element (str el)) inst-atom ctx)
     (vector? el)
     (let [head (first el)]
       (cond
-        (keyword? head) (reconcile-native! parent-widget parent-tag el inst-atom)
-        (fn? head)      (reconcile-comp! parent-widget parent-tag el inst-atom)
+        (keyword? head) (reconcile-native! parent-widget parent-tag el inst-atom ctx)
+        (fn? head)      (reconcile-comp! parent-widget parent-tag el inst-atom ctx)
         :else (throw (ex-info (str "unsupported hiccup element: " (pr-str el)) {:el el}))))
-    :else (reconcile-native! parent-widget parent-tag (b/text->element (pr-str el)) inst-atom)))
+    :else (reconcile-native! parent-widget parent-tag (b/text->element (pr-str el)) inst-atom ctx)))
 
 ;; --- public API --------------------------------------------------------------
 (defn mount
@@ -448,7 +787,7 @@
   [container-widget container-tag hiccup]
   (let [root (atom nil)]
     (try
-      (reconcile-el! container-widget container-tag hiccup root)
+      (reconcile-el! container-widget container-tag hiccup root nil)
       root
       (catch Throwable error
         (dispose-tree! root)
