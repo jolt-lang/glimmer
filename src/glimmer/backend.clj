@@ -140,7 +140,6 @@
   [opts mount-root!]
   ((op :run) opts mount-root!))
 
-
 (defn dispose-widget!
   "Dispose an unattached widget after a failed attachment. Optional for legacy
   backends; backends with owned native resources must implement :dispose!."
@@ -150,7 +149,9 @@
 
 (defn run-lifecycle
   "Explicit root ownership seam. :run-lifecycle receives opts and callbacks:
-    :mount!   (fn [container tag]) mounts the root; return value unspecified.
+    :mount!   (fn [container tag]) mounts the root and returns
+               {:window :tag :inst :root-fn}, :inst being the root as mounted
+               (a reload! replaces it).
     :unmount! (fn []) disposes the latest root (including reloads) before native
                teardown, on the GUI thread. Idempotent.
     :abandon! (fn []) detaches subscriptions without native calls, for unexpected

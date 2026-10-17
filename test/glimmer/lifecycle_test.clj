@@ -32,7 +32,7 @@
     (b/register!
      (assoc mock/backend :run-lifecycle
             (fn [_ {:keys [mount! unmount!]}]
-              (is (nil? (mount! win :window)))
+              (mount! win :window)
               (dotimes [_ 8]
                 (ui/reload!)
                 (is (= 1 (count @(:watches cell))))
@@ -55,6 +55,21 @@
     (is (empty? @(:watches cell)))
     (reset! cell 1)
     (is (= 0 (label-of win)))))
+
+;; Backends written against :run keep the mounted root mount-root! returns
+;; (glimmer-appkit exposes its :inst as root-inst).
+(deftest legacy-mount-root-returns-the-mounted-root
+  (let [cell (r/atom 0) win (mock/widget :window {}) mounted (atom nil)
+        root-fn (fn [] [:label {:label @cell}])]
+    (b/register! (assoc mock/backend :run (fn [_ mount-root!]
+                                            (reset! mounted (mount-root! win :window))
+                                            (reset! cell 1)
+                                            (is (= 1 (label-of win))))))
+    (ui/run root-fn)
+    (is (= win (:window @mounted)))
+    (is (= :window (:tag @mounted)))
+    (is (= root-fn (:root-fn @mounted)))
+    (is (instance? clojure.lang.Atom (:inst @mounted)))))
 
 (deftest a-legacy-loop-that-throws-still-releases-its-root
   (let [cell (r/atom 0) win (mock/widget :window {}) next-win (mock/widget :window {})
