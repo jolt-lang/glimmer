@@ -518,7 +518,9 @@
                              ;; run's reload! target in place. The finalizer below
                              ;; releases only its own.
                              (reset! live-root state)
-                             nil)
+                             ;; What mount-root! returned before this seam;
+                             ;; legacy backends (glimmer-appkit) keep its :inst.
+                             @state)
                    :unmount! #(dispose! true)
                    :abandon! #(dispose! false)}]
     (try
