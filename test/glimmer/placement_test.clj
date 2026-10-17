@@ -96,7 +96,9 @@
     (let [vbox (first (mock/children win))]
       (is (= ["comp" "tail"] (labels-of vbox)))
       (reset! native? true)
-      (is (= ["button" "tail"] (labels-of vbox))))))
+      (is (= ["button" "tail"] (labels-of vbox)))
+      (reset! native? false)
+      (is (= ["comp" "tail"] (labels-of vbox)) "and back into a component"))))
 
 (deftest a-component-nested-in-a-wrapper-is-placed-in-the-wrapper-slot
   (let [show (r/atom false) win (mock/widget :window {})
