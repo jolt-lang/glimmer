@@ -34,7 +34,11 @@ widgets themselves come from a backend:
 The outer `let` runs once (so `count` persists); the inner `fn` re-runs whenever
 `@count` changes, and glimmer patches the live widgets in place instead of
 rebuilding them. Only the backend require names a toolkit — swapping GTK for
-another backend leaves the rest of that file alone.
+another backend leaves the rest of that file alone. Sizes are the one thing
+that read differently: numeric props such as `:spacing`, `:margin` and
+`:width-request` are in the backend's own unit, pixels (points on macOS) for
+the desktop toolkits and character cells for glimmer-tui, so `{:spacing 12}`
+that looks right in a GTK window is twelve blank lines in a terminal.
 
 ## Running
 
