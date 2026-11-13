@@ -491,3 +491,31 @@
                                   [:label {:label "z"}]]))]
     (ui/mount win :window [owner])
     (is (= ["init" "wrapped" "z"] (labels-in win)))))
+
+;; An app that shows one panel or another in the same place: the sidebar's
+;; vbox is reused for the panel's (same tag), so slots that held components
+;; now hold elements, and one element changes tag. Every widget must end up
+;; in the panel's order.
+(deftest swapping-one-component-for-another-keeps-the-new-childrens-order
+  (let [open (r/atom false) win (mock/widget :window {})
+        histogram (fn [] [:label {:label "histogram"}])
+        navigator (fn [] [:label {:label "navigator"}])
+        autopilot (fn [] [:hbox {:label "autopilot"}])
+        sidebar (fn [] [:vbox [histogram] [navigator] [autopilot]
+                        [:tabs {:label "tabs"} [:label {:label "page"}]]])
+        panel (fn [] [:vbox
+                      [:label {:label "title"}]
+                      [:hbox {:label "format"}]
+                      [:hbox {:label "profile"}]
+                      [:vbox {:label "options"}]
+                      [:hbox {:label "size"}]
+                      [:label {:label "spacer"}]
+                      [:hbox {:label "buttons"}]])
+        app (fn [] [:hbox [:label {:label "image"}] (if @open [panel] [sidebar])])]
+    (ui/mount win :window [app])
+    (let [side #(second (mock/children (first (mock/children win))))]
+      (is (= ["histogram" "navigator" "autopilot" "tabs"] (labels-of (side))))
+      (reset! open true)
+      (is (= ["title" "format" "profile" "options" "size" "spacer" "buttons"] (labels-of (side))))
+      (reset! open false)
+      (is (= ["histogram" "navigator" "autopilot" "tabs"] (labels-of (side)))))))
