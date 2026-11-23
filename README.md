@@ -54,7 +54,8 @@ would then grow with the number of children.
 
 Two shapes, exactly like reagent:
 
-- **Form-1** — a function returning hiccup. Re-invoked on every render.
+- **Form-1** — a function returning hiccup. Re-invoked when its parent passes it
+  different args, or when a cell it read changes.
 - **Form-2** — a function returning a render fn. The outer fn runs once on mount
   (so local atoms persist); the returned fn renders. Use this for component-local
   state.
@@ -62,6 +63,14 @@ Two shapes, exactly like reagent:
 Components are invoked as `[my-component arg ...]`. They produce no widget of
 their own — they expand to native elements — but each one is its own reactive
 unit: a cell it reads during render re-runs *only that component*.
+
+As in reagent, a parent's re-render skips a child component whose fn and args
+are `=` to those of its last completed render: its output depends only on its
+args and the cells it reads, and a change to one of those cells re-renders it on
+its own. So a component must not read state that isn't a reactive cell (a plain
+`clojure.core/atom`) and expect to see it change. A native element whose hiccup
+is `=` to its last render is skipped the same way, so an unchanged subtree costs
+no backend calls.
 
 A component's subscriptions are exactly the cells its latest render read: a cell
 it stops reading is dropped, and unmounting or replacing it detaches them at
@@ -204,8 +213,24 @@ per-item state:
 
 A key may be given in the props map (`[:label {:key id}]`) or as metadata
 (`^{:key id} [:label ...]`), on native elements and component invocations alike.
-A list that mixes keyed and unkeyed children falls back to positional matching,
-so a missing key never silently mis-reconciles.
+
+A list can mix keyed and unkeyed children, the way a Datastar morph mixes
+elements with ids and without: keyed children follow their keys, and each
+unkeyed child matches the unkeyed child of the same kind (tag, or component fn)
+in the same order among them. A header and footer around a keyed list keep their
+widgets while the rows move. Keys that repeat within one list fall back to
+positional matching.
+
+## Event handlers
+
+Props named `:on-*` whose value is a function are event handlers. A backend
+connects a handler once, when it creates the widget, so glimmer hands it a
+stable function per widget and event that calls the handler the *latest* render
+gave. A handler may close over plain values, and a handler that changes between
+renders takes effect without the widget being recreated; one a render drops does
+nothing until a render gives it again. A handler that first appears after the
+widget was created is not connected by backends that wire events only at
+creation, so give the key a handler from the first render.
 
 A widget a child gains after its siblings have theirs, such as a component that
 rendered nil and now renders an element, or a keyed row created ahead of the
@@ -228,6 +253,7 @@ the rest. The full contract is in the `glimmer.backend` namespace docstring:
  :remove-child!  (fn [parent-tag parent child])
  :replace-child! (fn [parent-tag parent old new])
  ;; optional
+ :patch-props!   (fn [tag widget old new])        ; re-apply knowing the last props
  :reorder-child! (fn [parent-tag parent child sibling])
  :schedule       (fn [work])                      ; run a thunk on the UI thread
  :run            (fn [opts mount-root!])          ; the event loop, backing ui/run
@@ -238,6 +264,13 @@ the rest. The full contract is in the `glimmer.backend` namespace docstring:
 
 A `widget` is whatever the backend wants — a native pointer, a record, a map. The
 core never inspects one, it only hands it back.
+
+`:patch-props!`, when present, replaces `:apply-props!` on re-render and also
+receives the props the previous render applied, so a backend can set only what
+changed. For a value the user edits (an entry's text, a checkbox), compare the
+new prop with the old *prop*, not with the widget's live value: then a re-render
+that repeats the old value leaves the user's input alone, and only a real change
+from the app overwrites it.
 
 Three implementations exist to work from: `glimmer-gtk.core` (over GTK4),
 `glimmer-tui.core` (over ncursesw, which also has to supply focus and an input
