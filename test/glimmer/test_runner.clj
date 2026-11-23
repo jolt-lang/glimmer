@@ -23,7 +23,7 @@
   (let [namespaces '[glimmer.ratom-test glimmer.ratom-protocol-test glimmer.table-test
                      glimmer.backend-test glimmer.core-test glimmer.reconcile-test
                      glimmer.subscription-test glimmer.lifecycle-test
-                     glimmer.placement-test]]
+                     glimmer.placement-test glimmer.morph-test]]
     ;; A namespace that fails to load registers no tests, so run-tests alone
     ;; would report it as a clean run; count it as a failure.
     (let [load-errors (count (for [ns namespaces

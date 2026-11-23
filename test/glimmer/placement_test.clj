@@ -355,9 +355,11 @@
   (doseq [[what next! expect] [["a further reorder" #(reset! (:order %) [:b :a :d :c]) ["b" "a" "d" "c"]]
                                ["a pass with no reorder" #(swap! (:tick %) inc) ["b" "a" "c" "d"]]]]
     (let [order (r/atom [:a :b :c :d]) tick (r/atom 0) fail-b? (atom false) win (mock/widget :window {})
-          row (fn [k] (when (and (= k :b) @fail-b?) (throw (ex-info "b failed" {})))
+          ;; the pass's order and tick are args, so every pass re-renders each
+          ;; row: a component with args = to its last render is skipped
+          row (fn [k _order _tick] (when (and (= k :b) @fail-b?) (throw (ex-info "b failed" {})))
                 [:label {:label (name k)}])
-          app (fn [] @tick (into [:vbox] (for [k @order] [row {:key k} k])))
+          app (fn [] (let [t @tick o @order] (into [:vbox] (for [k o] [row {:key k} k o t]))))
           vbox (container-of (ui/mount win :window [app]))]
       (reset! fail-b? true)
       (is (thrown? Exception (reset! order [:b :a :c :d])))
@@ -455,8 +457,10 @@
                 (when (and (= k :b) @arm)
                   (reset! arm false) (reset! a-fails a-throws?) (reset! drop-a true))
                 [:label {:label (name k)}])
+          ;; the order is an arg, so every pass re-renders each row: a component
+          ;; with args = to its last render is skipped
           app (fn [] (let [o (if @drop-a (vec (remove #{:a} @order)) @order)]
-                       (into [:vbox] (for [k o] [row {:key k :k k}]))))
+                       (into [:vbox] (for [k o] [row {:key k :k k :order o}]))))
           root (ui/mount win :window [app])
           what (str "a " (if a-throws? "throwing" "rendering") " dropped row")]
       (reset! arm true)

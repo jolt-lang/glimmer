@@ -20,6 +20,13 @@
 
   Optional keys:
 
+    :patch-props!   (fn [tag widget old-props new-props]) re-apply props on
+                    re-render, given the props the previous render applied, so
+                    the backend can set only what changed. A value the user can
+                    edit (an entry's text, a checkbox) should be set only when the
+                    new prop differs from the OLD PROP, not from the widget's live
+                    value, so a re-render never clobbers input in progress.
+                    Preferred over :apply-props! when present.
     :dispose!       (fn [widget]) dispose an unattached widget on mount failure.
     :run-lifecycle  (fn [opts lifecycle]) explicit root ownership; see run-lifecycle.
 
@@ -94,6 +101,24 @@
   "Re-apply `props` to an existing widget (the re-render path)."
   [tag widget props]
   ((op :apply-props!) tag widget props))
+
+(defn changed-props
+  "The entries of `new-props` whose value differs from `old-props`, for a
+  :patch-props! that sets only what changed. A key `old-props` had and
+  `new-props` lacks is not included: resetting it is the backend's call."
+  [old-props new-props]
+  (persistent!
+    (reduce-kv (fn [m k v] (if (and (contains? old-props k) (= v (get old-props k))) m (assoc! m k v)))
+               (transient {}) new-props)))
+
+(defn patch-props!
+  "Re-apply props to an existing widget, given the props the previous render
+  applied (`old-props`). Uses the backend's :patch-props! when it has one, so it
+  can diff; otherwise re-applies every prop with :apply-props!."
+  [tag widget old-props new-props]
+  (if-let [f (:patch-props! @impl)]
+    (f tag widget old-props new-props)
+    ((op :apply-props!) tag widget new-props)))
 
 ;; --- container children ------------------------------------------------------
 (defn append-child!

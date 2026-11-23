@@ -15,7 +15,10 @@
 
   Reconciling is positional: at each child position the existing widget is reused
   when the tag matches (props re-applied) and replaced when it doesn't; surplus
-  children are removed and new ones appended. Components are transparent — they
+  children are removed and new ones appended. When any child carries a :key,
+  children match by key, and the unkeyed ones by kind and order among themselves.
+  A component whose invocation is = to its last render, and a native element
+  whose hiccup is, are skipped by their parent's pass. Components are transparent — they
   produce no widget of their own, just expand to native elements — but each one
   binds glimmer.ratom/*current-watcher* around its render so any reactive cell it
   derefs re-runs that component (and only that component) on change. A widget a
@@ -26,7 +29,8 @@
   like — is reached through glimmer.backend, so the same reconciler drives GTK
   (glimmer-gtk), and any Qt or TUI backend that implements the same map of
   functions."
-  (:require [glimmer.backend :as b]
+  (:require [clojure.string :as str]
+            [glimmer.backend :as b]
             [glimmer.ratom :as r]))
 
 ;; --- reactive re-render marshalling (live REPL development) ------------------
@@ -132,12 +136,38 @@
 
 (defn keyed?
   "True when every child in `children` (a flat list of hiccup elements) carries a
-  non-nil key. An empty list is not keyed — the positional path handles the
-  no-children case. Mixed keyed/unkeyed lists fall back to positional so an
-  accidental missing key never silently mis-reconciles."
+  non-nil key. An empty list is not keyed. The reconciler itself takes the keyed
+  path as soon as any child is keyed (see effective-keys); this answers only
+  whether a list is uniformly keyed."
   [children]
   (boolean (and (seq children)
                 (every? #(some? (child-key %)) children))))
+
+(defn- child-kind
+  "What an unkeyed child is, for matching it across renders: a native element's
+  tag, a component's fn, or ::text for a string or number."
+  [el]
+  (cond (vector? el) (first el)
+        (or (string? el) (number? el)) ::text
+        :else ::other))
+
+(defn effective-keys
+  "The key each child of `children` (a flat list of hiccup) reconciles by, or nil
+  when its explicit keys repeat. A keyed child keeps its key. An unkeyed one gets
+  [::auto kind n]: its kind (child-kind) and how many unkeyed children of that
+  kind come before it. So in a list that mixes the two, the keyed children follow
+  their keys and the unkeyed ones match the same kind in the same order, as
+  Datastar's morph matches ids first and tags after."
+  [children]
+  (let [explicit (keep child-key children)]
+    (when (= (count explicit) (count (set explicit)))
+      (first
+        (reduce (fn [[ks seen] el]
+                  (if-let [k (child-key el)]
+                    [(conj ks k) seen]
+                    (let [kind (child-kind el) n (get seen kind 0)]
+                      [(conj ks [::auto kind n]) (assoc seen kind (inc n))])))
+                [[] {}] children)))))
 
 (defn- strictly-increasing? [xs]
   ;; `(apply < [])` throws in jolt (< needs >=1 arg), so treat empty as vacuously
@@ -180,7 +210,7 @@
 ;; instance also keeps its slots' order state (see widget placement below), and
 ;; a keyed slot its :key and the :index the last keyed pass put it at.
 
-(declare reconcile-el!)
+(declare reconcile-el! reconcile-comp-render!)
 
 (defn- inst-widget
   "The widget an instance contributes to its parent container: a native
@@ -539,7 +569,7 @@
   "Positionally reconcile `new-children` (a flattened vector of hiccup) against the
   instance's existing children, reusing widgets where the element shape matches at
   a position. The default path when children are not uniformly keyed."
-  [parent-widget parent-tag new-children inst-atom]
+  [parent-widget parent-tag new-children new-keys inst-atom]
   (let [cm @inst-atom
         old (:children cm)
         unordered? (:unordered cm)
@@ -558,7 +588,12 @@
     (render-slots! inst-atom reused
                    (fn [i a]
                      (reconcile-el! parent-widget parent-tag (nth new-children i) a
-                                    {:container inst-atom :slot a :index i})))
+                                    {:container inst-atom :slot a :index i})
+                     ;; the key a later pass that mixes in keyed children
+                     ;; matches this one by; none when explicit keys repeated
+                     (if new-keys
+                       (let [k (nth new-keys i)] (swap! a #(assoc % :key k)))
+                       (swap! a #(when % (dissoc % :key))))))
     (when unordered?
       (move-widgets! parent-widget parent-tag inst-atom reused nil))))
 
@@ -573,7 +608,7 @@
   across add/remove/reorder instead of a stale position. Widgets gained during a
   pass that moves any defer to its move step; a render error skips that step and
   leaves the container :unordered."
-  [parent-widget parent-tag new-children inst-atom]
+  [parent-widget parent-tag new-children new-keys inst-atom]
   (let [cm @inst-atom
         old (:children cm)
         unordered? (:unordered cm)
@@ -581,7 +616,6 @@
         ;; before this parent became keyed) is absent from new-set, so keyed-plan
         ;; destroys it rather than orphaning its widget in the container.
         old-keys (vec (map (fn [a] (:key @a)) old))
-        new-keys (vec (map child-key new-children))
         plan (keyed-plan old-keys new-keys)
         destroy (:destroy plan)
         slots (:slots plan)
@@ -615,15 +649,59 @@
 
 (defn- reconcile-children!
   "Reconcile `new-children` (hiccup) against the instance's existing children.
-  When every child carries a stable :key, reconcile by identity — a row's widget
+  When any child carries a stable :key, reconcile by identity — a row's widget
   and signal handlers follow its key across add/remove/reorder, so a handler may
-  safely close over per-item state. Otherwise fall back to positional matching.
-  `new-children` is flattened first."
+  safely close over per-item state — and match the unkeyed children among
+  themselves by kind and order (see effective-keys). With no keys, or keys that
+  repeat, match by position. `new-children` is flattened first."
   [parent-widget parent-tag new-children inst-atom]
-  (let [flat (flatten-children new-children)]
-    (if (keyed? flat)
-      (reconcile-keyed-children! parent-widget parent-tag flat inst-atom)
-      (reconcile-positional-children! parent-widget parent-tag flat inst-atom))))
+  (let [flat (flatten-children new-children)
+        ks (effective-keys flat)]
+    (if (and ks (some child-key flat))
+      (reconcile-keyed-children! parent-widget parent-tag flat ks inst-atom)
+      (reconcile-positional-children! parent-widget parent-tag flat ks inst-atom))))
+
+;; --- event handlers ----------------------------------------------------------
+;; Backends connect an :on-* handler once, when they create the widget, so the
+;; first render's closure would answer for the widget's whole life. Instead the
+;; backend is handed a trampoline per widget and event, made once, that calls the
+;; handler the latest render passed. A handler can then close over values rather
+;; than cells, and one that changes between renders (an action sent by a server)
+;; takes effect without the widget being recreated.
+
+(defn handler-key?
+  "True for a prop key naming an event handler: :on-click, :on-change, ..."
+  [k]
+  (and (keyword? k) (str/starts-with? (name k) "on-")))
+
+(defn- trampoline-for
+  "The handler for event `k` of the widget held by `inst-atom`: it calls whatever
+  handler the latest render gave `k`, with the backend's arguments, and does
+  nothing while that render gave none."
+  [inst-atom k]
+  (fn [& args]
+    (when-let [h (get-in @inst-atom [:props k])]
+      (apply h args))))
+
+(defn- wrap-handlers
+  "`props` with every fn-valued handler replaced by its trampoline from
+  `handlers` ({k trampoline}), made and added there when missing. Returns
+  [props handlers]."
+  [props handlers inst-atom]
+  (reduce-kv (fn [[ps hs] k v]
+               (if (and (fn? v) (handler-key? k))
+                 (let [t (or (get hs k) (trampoline-for inst-atom k))]
+                   [(assoc ps k t) (assoc hs k t)])
+                 [ps hs]))
+             [props handlers] props))
+
+(defn- mark-rendered!
+  "Record `v` as the hiccup the native instance in `inst-atom` last rendered in
+  full, when it still holds `widget`: a nested pass may have dropped or replaced
+  it meanwhile, and a render that throws never gets here, so the next render
+  with equal hiccup is only skipped after one that completed."
+  [inst-atom widget v]
+  (swap! inst-atom #(if (and % (identical? widget (:widget %))) (assoc % :hiccup v) %)))
 
 (defn- reconcile-native!
   [parent-widget parent-tag v inst-atom ctx]
@@ -634,17 +712,27 @@
         cm (when c @c)
         rank (when c (slot-rank cm (:slot ctx) (:index ctx)))]
     (cond
+      ;; the same hiccup as last time: nothing to apply, nothing below changed
+      ;; (a component further down that read a changed cell re-renders itself)
+      (and reuse? (= v (:hiccup inst)) (not (:unordered inst)))
+      nil
+
       reuse?
-      (do (b/apply-props! tag (:widget inst) props)
-          (swap! inst-atom assoc :props props)
-          (reconcile-children! (:widget inst) tag children inst-atom))
+      (let [[applied handlers] (wrap-handlers props (:handlers inst) inst-atom)]
+        (swap! inst-atom assoc :props props :handlers handlers)
+        (b/patch-props! tag (:widget inst) (:applied inst) applied)
+        (swap! inst-atom assoc :applied applied :hiccup nil)
+        (reconcile-children! (:widget inst) tag children inst-atom)
+        (mark-rendered! inst-atom (:widget inst) v))
 
       ;; a nested pass dropped the slot while this render was under way
       (and c (nil? rank)) nil
 
       :else
-      (let [widget (b/create! tag props)
-            new {:type :native :tag tag :props props :widget widget :children []}
+      (let [[applied handlers] (wrap-handlers props {} inst-atom)
+            widget (b/create! tag applied)
+            new {:type :native :tag tag :props props :applied applied
+                 :handlers handlers :widget widget :children []}
             replacing? (and inst (= (:type inst) :native))]
         (try
           (if replacing?
@@ -677,7 +765,8 @@
             (when-not (and (or defer? (>= rank (:tail cm -1)))
                            (compare-and-set! c cm (record-gain cm rank slot defer?)))
               (place-gained! c slot rank defer? parent-tag parent-widget widget))))
-        (reconcile-children! widget tag children inst-atom)))))
+        (reconcile-children! widget tag children inst-atom)
+        (mark-rendered! inst-atom widget v)))))
 
 (defn rerender-thunk
   "The zero-arg closure a component's watcher runs to re-render it: re-reconciles
@@ -695,7 +784,25 @@
   Each component renders exactly once per render: a Form-2 component's outer fn
   runs only on mount (its returned render fn is cached); a Form-1 component's fn
   is re-applied each render. We classify with fn?, not ifn? — a hiccup vector is
-  callable, so ifn? would treat every Form-1 result as a Form-2 render fn."
+  callable, so ifn? would treat every Form-1 result as a Form-2 render fn.
+
+  A parent's pass skips a component whose invocation `v` is = to the one its last
+  completed render had, as reagent does: its output depends only on its args and
+  the cells it read, and a change to one of those re-renders it through its own
+  watcher, which passes `rerender?` and is never skipped."
+  ([parent-widget parent-tag v inst-atom ctx]
+   (reconcile-comp! parent-widget parent-tag v inst-atom ctx false))
+  ([parent-widget parent-tag v inst-atom ctx rerender?]
+   (let [cur @inst-atom]
+     (when-not (and (not rerender?) (= :comp (:type cur)) (= v (:rendered cur)))
+       (swap! inst-atom #(when % (dissoc % :rendered)))
+       (reconcile-comp-render! parent-widget parent-tag v inst-atom ctx)
+       (swap! inst-atom #(if (and % (= :comp (:type %)) (identical? v (:v %)))
+                           (assoc % :rendered v)
+                           %))))))
+
+(defn- reconcile-comp-render!
+  "Render the component invocation `v` into `inst-atom`; see reconcile-comp!."
   [parent-widget parent-tag v inst-atom ctx]
   (let [f (first v)
         ;; strip a leading {:key k} so it never reaches the component fn — mirrors
@@ -742,7 +849,7 @@
                       (let [disposed (atom false)
                             ctx (dissoc ctx :defer)
                             w (make-rerender-watcher
-                                (rerender-thunk #(reconcile-comp! %1 %2 %3 %4 ctx)
+                                (rerender-thunk #(reconcile-comp! %1 %2 %3 %4 ctx true)
                                                 parent-widget parent-tag inst-atom)
                                 b/loop-running? b/schedule disposed)]
                         (swap! inst-atom assoc :watcher w :disposed disposed

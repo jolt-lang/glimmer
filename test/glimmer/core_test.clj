@@ -56,7 +56,7 @@
 (deftest keyed?-detects-uniformly-keyed-children
   (testing "true when every child carries a key"
     (is (true? (ui/keyed? [[:label {:key "a"}] [:label {:key "b"}]]))))
-  (testing "false when any child is unkeyed (mixed mode falls back to positional)"
+  (testing "false when any child is unkeyed"
     (is (false? (ui/keyed? [[:label {:key "a"}] [:label {:label "x"}]]))))
   (testing "false when empty — no children, nothing to key"
     (is (false? (ui/keyed? [])))))
