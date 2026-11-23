@@ -165,3 +165,8 @@
   (let [f (fn [] :fmt) c (mock/widget :box {})]
     (ui/mount c :box [:label {:format f}])
     (is (identical? f (:format (:props @(only-child c)))))))
+
+(deftest changed-props-keeps-what-differs-from-the-last-render
+  (is (= {:b 3 :c 4} (b/changed-props {:a 1 :b 2} {:a 1 :b 3 :c 4})))
+  (is (= {:a nil} (b/changed-props {} {:a nil})) "a newly given nil counts as changed")
+  (is (= {} (b/changed-props {:a 1 :gone 2} {:a 1}))))

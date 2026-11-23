@@ -102,6 +102,15 @@
   [tag widget props]
   ((op :apply-props!) tag widget props))
 
+(defn changed-props
+  "The entries of `new-props` whose value differs from `old-props`, for a
+  :patch-props! that sets only what changed. A key `old-props` had and
+  `new-props` lacks is not included: resetting it is the backend's call."
+  [old-props new-props]
+  (persistent!
+    (reduce-kv (fn [m k v] (if (and (contains? old-props k) (= v (get old-props k))) m (assoc! m k v)))
+               (transient {}) new-props)))
+
 (defn patch-props!
   "Re-apply props to an existing widget, given the props the previous render
   applied (`old-props`). Uses the backend's :patch-props! when it has one, so it
