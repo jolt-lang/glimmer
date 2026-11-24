@@ -695,6 +695,20 @@
                  [ps hs]))
              [props handlers] props))
 
+(defn hiccup=
+  "Whether hiccup `a` and `b` would render the same: `=`, and also the same
+  ^{:key} metadata on every vector, which `=` ignores. A child whose key alone
+  changed must be reconciled, not skipped."
+  [a b]
+  (or (identical? a b)
+      (cond
+        (vector? a) (and (vector? b)
+                         (= (count a) (count b))
+                         (= (:key (meta a)) (:key (meta b)))
+                         (every? true? (map hiccup= a b)))
+        (seq? a) (and (seq? b) (= (count a) (count b)) (every? true? (map hiccup= a b)))
+        :else (= a b))))
+
 (defn- mark-rendered!
   "Record `v` as the hiccup the native instance in `inst-atom` last rendered in
   full, when it still holds `widget`: a nested pass may have dropped or replaced
@@ -714,7 +728,7 @@
     (cond
       ;; the same hiccup as last time: nothing to apply, nothing below changed
       ;; (a component further down that read a changed cell re-renders itself)
-      (and reuse? (= v (:hiccup inst)) (not (:unordered inst)))
+      (and reuse? (hiccup= v (:hiccup inst)) (not (:unordered inst)))
       nil
 
       reuse?

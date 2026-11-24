@@ -170,3 +170,16 @@
   (is (= {:b 3 :c 4} (b/changed-props {:a 1 :b 2} {:a 1 :b 3 :c 4})))
   (is (= {:a nil} (b/changed-props {} {:a nil})) "a newly given nil counts as changed")
   (is (= {} (b/changed-props {:a 1 :gone 2} {:a 1}))))
+
+(deftest a-key-changed-only-in-metadata-is-not-skipped
+  ;; = ignores metadata, so hiccup whose children differ only in ^{:key} would
+  ;; look unchanged; the child with the new key must still get a new widget
+  (mock/install!)
+  (let [gen (r/atom 0) c (mock/widget :box {})
+        app (fn [] [:vbox (with-meta [:label {:label "a"}] {:key ["a" @gen]})])]
+    (ui/mount c :box [app])
+    (let [before (mock/ids (only-child c))]
+      (swap! gen inc)
+      (is (not= before (mock/ids (only-child c))) "a new key, a new widget"))
+    (is (ui/hiccup= [:a ^{:key 1} [:b]] [:a ^{:key 1} [:b]]))
+    (is (not (ui/hiccup= [:a ^{:key 1} [:b]] [:a ^{:key 2} [:b]])))))
